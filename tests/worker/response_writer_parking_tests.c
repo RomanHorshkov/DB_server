@@ -87,7 +87,7 @@ static int _setup(void** state)
     fixture_t* f = calloc(1, sizeof(*f));
     assert_non_null(f);
 
-    assert_int_equal(operator_init(&f->op, 0u, RING_CAP), STATUS_SUCCESS);
+    assert_int_equal(operator_init(&f->op, 0u, RING_CAP, WORKER_MAX_CLIENTS), STATUS_SUCCESS);
 
     int sv[2];
     assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);

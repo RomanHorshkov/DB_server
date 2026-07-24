@@ -131,9 +131,19 @@ typedef struct
     reactor_t reactor;
 
     /**
-     * @brief Client slots owned by this operator.
+     * @brief Client slots owned by this operator — calloc'd to @c max_clients at operator_init() time
+     * (mirroring how worker.c's _worker.operators is itself calloc'd to a runtime operators_count),
+     * not a WORKER_MAX_CLIENTS-sized array member: DB_SERVER_MAX_CLIENTS (worker.c's
+     * _compute_max_clients()) lets a deployer raise/lower the per-operator slot cap at startup.
      */
-    client_t clients[WORKER_MAX_CLIENTS];
+    client_t* clients;
+
+    /**
+     * @brief Slot count backing @c clients — resolved once at worker_init() time (see worker.c's
+     * DB_SERVER_MAX_CLIENTS handling) and passed to every operator, same as ring_capacity. Replaces
+     * WORKER_MAX_CLIENTS as the per-operator capacity bound everywhere except the compile-time default.
+     */
+    uint32_t max_clients;
 
     /**
      * @brief Active clients count.
@@ -177,9 +187,12 @@ typedef struct
  * @param ring_capacity Mailbox (SPSC ring) capacity — resolved once at worker_init() time
  *                       (see worker.c's DB_SERVER_RING_CAPACITY handling), not a per-operator
  *                       choice; every operator gets the same value. Must be a power of two.
+ * @param max_clients   Per-operator client-slot cap — resolved once at worker_init() time (see
+ *                       worker.c's DB_SERVER_MAX_CLIENTS handling), same value for every operator.
+ *                       op->clients is calloc'd to exactly this many slots.
  * @return STATUS_SUCCESS on success, STATUS_FAILURE on error.
  */
-int operator_init(operator_t* op, uint8_t id, uint32_t ring_capacity);
+int operator_init(operator_t* op, uint8_t id, uint32_t ring_capacity, uint32_t max_clients);
 
 /**
  * @brief Ask a RUNNING operator thread to stop: set SHUTDOWN atomically and wake

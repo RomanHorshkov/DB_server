@@ -56,6 +56,10 @@ static void test_ring_capacity_env_unset_is_valid(void** state);
 static void test_ring_capacity_env_valid_power_of_two_accepted(void** state);
 static void test_ring_capacity_env_non_power_of_two_rejected(void** state);
 static void test_ring_capacity_env_out_of_range_rejected(void** state);
+static void test_max_clients_env_unset_is_valid(void** state);
+static void test_max_clients_env_valid_integer_accepted(void** state);
+static void test_max_clients_env_out_of_range_rejected(void** state);
+static void test_max_clients_env_non_numeric_rejected(void** state);
 static void test_upload_workers_env_unset_is_valid(void** state);
 static void test_upload_workers_env_valid_integer_accepted(void** state);
 static void test_upload_workers_env_zero_rejected(void** state);
@@ -77,6 +81,7 @@ static int _setup_clears_env(void** state)
     (void)state;
     unsetenv("DB_SERVER_WORKERS");
     unsetenv("DB_SERVER_RING_CAPACITY");
+    unsetenv("DB_SERVER_MAX_CLIENTS");
     unsetenv("DB_SERVER_UPLOAD_WORKERS");
     unsetenv("DB_SERVER_UPLOAD_QUEUE_DEPTH");
     return 0;
@@ -235,6 +240,43 @@ static void test_ring_capacity_env_out_of_range_rejected(void** state)
     assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
 }
 
+static void test_max_clients_env_unset_is_valid(void** state)
+{
+    (void)state;
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+}
+
+static void test_max_clients_env_valid_integer_accepted(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_MAX_CLIENTS", "8", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+    setenv("DB_SERVER_MAX_CLIENTS", "255", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+    setenv("DB_SERVER_MAX_CLIENTS", "128", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+}
+
+static void test_max_clients_env_out_of_range_rejected(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_MAX_CLIENTS", "7", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+    setenv("DB_SERVER_MAX_CLIENTS", "256", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+    setenv("DB_SERVER_MAX_CLIENTS", "0", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+    setenv("DB_SERVER_MAX_CLIENTS", "-1", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+}
+
+static void test_max_clients_env_non_numeric_rejected(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_MAX_CLIENTS", "banana", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+}
+
 static void test_upload_workers_env_unset_is_valid(void** state)
 {
     (void)state;
@@ -333,6 +375,10 @@ int main(void)
         cmocka_unit_test_setup(test_ring_capacity_env_valid_power_of_two_accepted, _setup_clears_env),
         cmocka_unit_test_setup(test_ring_capacity_env_non_power_of_two_rejected, _setup_clears_env),
         cmocka_unit_test_setup(test_ring_capacity_env_out_of_range_rejected, _setup_clears_env),
+        cmocka_unit_test_setup(test_max_clients_env_unset_is_valid, _setup_clears_env),
+        cmocka_unit_test_setup(test_max_clients_env_valid_integer_accepted, _setup_clears_env),
+        cmocka_unit_test_setup(test_max_clients_env_out_of_range_rejected, _setup_clears_env),
+        cmocka_unit_test_setup(test_max_clients_env_non_numeric_rejected, _setup_clears_env),
         cmocka_unit_test_setup(test_upload_workers_env_unset_is_valid, _setup_clears_env),
         cmocka_unit_test_setup(test_upload_workers_env_valid_integer_accepted, _setup_clears_env),
         cmocka_unit_test_setup(test_upload_workers_env_zero_rejected, _setup_clears_env),

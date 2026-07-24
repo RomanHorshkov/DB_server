@@ -78,7 +78,7 @@ static void test_timeout_scan_reclaims_slot_past_active_clients_bound(void** sta
 
     operator_t op;
     memset(&op, 0, sizeof op);
-    assert_int_equal(operator_init(&op, 9u, TEST_RING_CAPACITY), STATUS_SUCCESS);
+    assert_int_equal(operator_init(&op, 9u, TEST_RING_CAPACITY, WORKER_MAX_CLIENTS), STATUS_SUCCESS);
 
     /* Two real fds (socketpair halves) so reactor_del()/socket_shutdown_and_close() inside the removal
      * path operate on genuine, registered descriptors instead of hitting the (harmless but noisy)

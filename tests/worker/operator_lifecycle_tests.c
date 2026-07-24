@@ -36,7 +36,11 @@
 
 #include <pthread.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
+
+#include <spscring.h>
 
 #include <db_server/core/worker/operator/operator.h>
 #include <db_server/core/worker/worker.h>
@@ -67,6 +71,17 @@ static void test_operator_init_leaves_status_initializing(void** state);
 static void test_operator_thread_happy_path_reaches_active_with_parsers(void** state);
 static void test_operator_thread_honors_concurrent_shutdown_never_hangs(void** state);
 static void test_worker_init_run_destroy_happy_path(void** state);
+static void test_operator_enforces_overridden_max_clients_not_default(void** state);
+
+/** @brief Push @p fd onto @p op's mailbox ring and wake it — exactly worker_dispatch_to_operator()'s
+ *         own two steps (worker.c), reproduced here so the test can drive a single operator_t directly
+ *         without going through worker_init()/the whole dispatcher. */
+static void _push_client_fd(operator_t* op, int fd);
+
+/** @brief Bounded poll for op->active_clients to reach @p want (relaxed atomic load) — client
+ *         registration happens asynchronously on the operator's own thread after a ring push, so
+ *         reading it once, right after _push_client_fd(), would race the real registration. */
+static int _wait_active_clients(operator_t* op, unsigned want, int timeout_s);
 
 /*****************************************************************************************************************************************
  * PRIVATE FUNCTIONS DEFINITIONS
@@ -81,6 +96,36 @@ static int _bounded_join(pthread_t thread)
     return pthread_timedjoin_np(thread, NULL, &deadline);
 }
 
+static void _push_client_fd(operator_t* op, int fd)
+{
+    assert_int_equal(spsc_ring_push(op->ring, fd), 0);
+    atomic_fetch_add_explicit(&op->queued_clients, 1U, memory_order_relaxed);
+    uint64_t one = 1U;
+    assert_int_equal(write(op->wakeup_ctx.fd, &one, sizeof one), (ssize_t)sizeof one);
+}
+
+static int _wait_active_clients(operator_t* op, unsigned want, int timeout_s)
+{
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_s;
+    for(;;)
+    {
+        if(atomic_load_explicit(&op->active_clients, memory_order_relaxed) == want)
+        {
+            return 1;
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if(now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
+        {
+            return 0;
+        }
+        struct timespec poll_interval = {.tv_sec = 0, .tv_nsec = 1000000L};
+        nanosleep(&poll_interval, NULL);
+    }
+}
+
 /** @brief operator_init() alone (the boot-thread half) must NOT allocate any client parser — that
  *         allocation moved to operator_thread() specifically to fix the NUMA first-touch gap. */
 static void test_operator_init_leaves_status_initializing(void** state)
@@ -89,7 +134,7 @@ static void test_operator_init_leaves_status_initializing(void** state)
     operator_t op;
     memset(&op, 0, sizeof op);
 
-    assert_int_equal(operator_init(&op, 0u, TEST_RING_CAPACITY), STATUS_SUCCESS);
+    assert_int_equal(operator_init(&op, 0u, TEST_RING_CAPACITY, WORKER_MAX_CLIENTS), STATUS_SUCCESS);
     assert_int_equal(op.status, OPERATOR_STATUS_INITIALIZING);
     assert_non_null(op.ring);
     assert_int_not_equal(op.wakeup_ctx.fd, -1);
@@ -108,7 +153,7 @@ static void test_operator_thread_happy_path_reaches_active_with_parsers(void** s
     (void)state;
     operator_t op;
     memset(&op, 0, sizeof op);
-    assert_int_equal(operator_init(&op, 1u, TEST_RING_CAPACITY), STATUS_SUCCESS);
+    assert_int_equal(operator_init(&op, 1u, TEST_RING_CAPACITY, WORKER_MAX_CLIENTS), STATUS_SUCCESS);
 
     pthread_t thread;
     assert_int_equal(pthread_create(&thread, NULL, operator_thread, &op), 0);
@@ -150,7 +195,7 @@ static void test_operator_thread_honors_concurrent_shutdown_never_hangs(void** s
     {
         operator_t op;
         memset(&op, 0, sizeof op);
-        assert_int_equal(operator_init(&op, (uint8_t)(i % 256), TEST_RING_CAPACITY), STATUS_SUCCESS);
+        assert_int_equal(operator_init(&op, (uint8_t)(i % 256), TEST_RING_CAPACITY, WORKER_MAX_CLIENTS), STATUS_SUCCESS);
 
         pthread_t thread;
         assert_int_equal(pthread_create(&thread, NULL, operator_thread, &op), 0);
@@ -184,6 +229,78 @@ static void test_worker_init_run_destroy_happy_path(void** state)
     assert_int_equal(worker_get_operators_count(), 0u);
 }
 
+/** @brief operator_init(..., max_clients) with a small OVERRIDE (3, nowhere near the compile-time
+ *         WORKER_MAX_CLIENTS default of 64) must actually cap registration at that override, not the
+ *         default — the item-3 property under test (DB_SERVER_MAX_CLIENTS's runtime enforcement).
+ *         Drives real connected socketpair fds through the SAME two steps
+ *         worker_dispatch_to_operator() uses (ring push + wakeup) directly against one operator_t, so
+ *         no worker/env plumbing is needed to observe the operator's own enforcement. */
+static void test_operator_enforces_overridden_max_clients_not_default(void** state)
+{
+    (void)state;
+    const uint32_t custom_cap = 3u;
+
+    operator_t op;
+    memset(&op, 0, sizeof op);
+    assert_int_equal(operator_init(&op, 7u, TEST_RING_CAPACITY, custom_cap), STATUS_SUCCESS);
+    assert_int_equal(op.max_clients, custom_cap);
+
+    pthread_t thread;
+    assert_int_equal(pthread_create(&thread, NULL, operator_thread, &op), 0);
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += TEST_JOIN_TIMEOUT_S;
+    operator_status_t st;
+    while((st = op.status) == OPERATOR_STATUS_INITIALIZING)
+    {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        assert_true(now.tv_sec < deadline.tv_sec);
+        struct timespec poll_interval = {.tv_sec = 0, .tv_nsec = 100000L};
+        nanosleep(&poll_interval, NULL);
+    }
+    assert_int_equal(st, OPERATOR_STATUS_ACTIVE);
+
+    /* custom_cap + 1 real connected socketpairs — one more than the override allows. */
+    int sv[4][2];
+    for(unsigned i = 0; i < custom_cap + 1u; ++i)
+    {
+        assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, sv[i]), 0);
+    }
+
+    /* Fill the operator up to EXACTLY the override, one at a time so each registration is observed
+     * (active_clients is asynchronous w.r.t. the ring push). */
+    for(unsigned i = 0; i < custom_cap; ++i)
+    {
+        _push_client_fd(&op, sv[i][0]);
+        assert_true(_wait_active_clients(&op, i + 1u, TEST_JOIN_TIMEOUT_S));
+    }
+    assert_int_equal(atomic_load(&op.active_clients), custom_cap);
+    assert_int_equal(op.status, OPERATOR_STATUS_FULL);
+
+    /* The (custom_cap+1)-th connection: the operator's own _get_available_client_slot() must refuse
+     * it (no free slot below the override) — active_clients must never exceed custom_cap. Give the
+     * wakeup handler a bounded moment to (fail to) process it, then assert the count never moved. */
+    _push_client_fd(&op, sv[custom_cap][0]);
+    struct timespec settle = {.tv_sec = 0, .tv_nsec = 200000000L};
+    nanosleep(&settle, NULL);
+    assert_int_equal(atomic_load(&op.active_clients), custom_cap);
+
+    operator_request_shutdown(&op);
+    assert_int_equal(_bounded_join(thread), 0);
+    operator_shutdown(&op);
+
+    /* Close every socketpair fd: our own halves, plus BOTH halves of the rejected (custom_cap+1)-th
+     * pair — that one was never registered with the operator (operator_shutdown() only closes slots
+     * it actually owns), so its sv[custom_cap][0] end would otherwise leak. */
+    for(unsigned i = 0; i < custom_cap + 1u; ++i)
+    {
+        close(sv[i][1]);
+    }
+    close(sv[custom_cap][0]);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -191,6 +308,7 @@ int main(void)
         cmocka_unit_test(test_operator_thread_happy_path_reaches_active_with_parsers),
         cmocka_unit_test(test_operator_thread_honors_concurrent_shutdown_never_hangs),
         cmocka_unit_test(test_worker_init_run_destroy_happy_path),
+        cmocka_unit_test(test_operator_enforces_overridden_max_clients_not_default),
     };
     return cmocka_run_group_tests_name("operator_lifecycle", tests, NULL, NULL);
 }

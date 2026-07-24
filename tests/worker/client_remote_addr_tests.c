@@ -192,7 +192,7 @@ static void test_operator_add_client_captures_real_peer_address_via_ring(void** 
 
     operator_t op;
     memset(&op, 0, sizeof op);
-    assert_int_equal(operator_init(&op, 3u, TEST_RING_CAPACITY), STATUS_SUCCESS);
+    assert_int_equal(operator_init(&op, 3u, TEST_RING_CAPACITY, WORKER_MAX_CLIENTS), STATUS_SUCCESS);
 
     pthread_t thread;
     assert_int_equal(pthread_create(&thread, NULL, operator_thread, &op), 0);

@@ -31,6 +31,7 @@ static int _validate_unix_path(const char* label, const char* path);
 static int _validate_listen_spec(const char* label, const char* spec);
 static int _validate_workers_env(void);
 static int _validate_ring_capacity_env(void);
+static int _validate_max_clients_env(void);
 static int _validate_upload_workers_env(void);
 static int _validate_upload_queue_depth_env(void);
 
@@ -56,6 +57,10 @@ int config_validate_startup(const char* api_spec, const char* upload_spec)
         valid = 0;
     }
     if(_validate_ring_capacity_env() != STATUS_SUCCESS)
+    {
+        valid = 0;
+    }
+    if(_validate_max_clients_env() != STATUS_SUCCESS)
     {
         valid = 0;
     }
@@ -201,6 +206,27 @@ static int _validate_ring_capacity_env(void)
     if(errno != 0 || end == env || *end != '\0' || val < 8 || val > 1024 || (val & (val - 1)) != 0)
     {
         EML_ERROR(LOG_TAG, "DB_SERVER_RING_CAPACITY='%s' is invalid (want a power of two in 8..1024)", env);
+        return STATUS_FAILURE;
+    }
+    return STATUS_SUCCESS;
+}
+
+/** @brief Bounds mirror worker.c's _compute_max_clients() (8..255) — keep both in sync if either
+ *         changes. Unlike ring capacity, this is a plain integer bound, not a power-of-two one. */
+static int _validate_max_clients_env(void)
+{
+    const char* env = getenv("DB_SERVER_MAX_CLIENTS");
+    if(!env || env[0] == '\0')
+    {
+        return STATUS_SUCCESS;
+    }
+
+    errno          = 0;
+    char*     end  = NULL;
+    const long val = strtol(env, &end, 10);
+    if(errno != 0 || end == env || *end != '\0' || val < 8 || val > 255)
+    {
+        EML_ERROR(LOG_TAG, "DB_SERVER_MAX_CLIENTS='%s' is invalid (want an integer 8..255)", env);
         return STATUS_FAILURE;
     }
     return STATUS_SUCCESS;

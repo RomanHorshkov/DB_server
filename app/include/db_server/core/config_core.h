@@ -70,7 +70,12 @@ typedef enum
  *****************************************************************************************************************************************
  */
 
-/* Max clients amount */
+/* Max clients amount per operator (compile-time default). Explicit runtime override:
+ * DB_SERVER_MAX_CLIENTS env var (8..255, validated in config_validate.c, resolved once in
+ * worker.c's _compute_max_clients() and passed to every operator_init() call) — same shape as
+ * DB_SERVER_WORKERS/DB_SERVER_RING_CAPACITY. client_t is dominated by a 32 KiB read buffer, so the
+ * memory cost of a higher cap is trivial; this constant is only ever the FALLBACK when the env var
+ * is unset or invalid. */
 #define WORKER_MAX_CLIENTS                           64U
 
 /* Client short timeout [s]: applied before first activity (initial request) */

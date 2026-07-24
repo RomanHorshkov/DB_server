@@ -32,8 +32,6 @@
 
 #define LOG_TAG                           "srv_worker"
 
-#define BLIND_ASSIGNMENT_LIMIT_PERCENTAGE (WORKER_MAX_CLIENTS) / (10U) /* 10% load */
-
 /* Bound on worker_run()'s wait for each operator's post-pin init (client parser alloc — a handful of
  * mallocs, microseconds in practice). Generous on purpose: this only fires once, at startup, and
  * exists to catch a genuinely stuck/failed thread, not to shave milliseconds off the happy path. */
@@ -79,6 +77,14 @@ typedef struct
      *        it destroys operators (the worker_init fail path has none).
      */
     bool threads_started;
+
+    /**
+     * @brief Per-operator client-slot cap resolved once at worker_init() (DB_SERVER_MAX_CLIENTS or the
+     * WORKER_MAX_CLIENTS default) — every operator gets this exact value. Kept here too (not just on
+     * each operator_t) so _least_loaded_operator()'s blind-assignment threshold can scale with the
+     * ACTUAL cap instead of a compile-time constant that a runtime override would make stale.
+     */
+    uint32_t max_clients;
 } worker_t;
 
 /*****************************************************************************************************************************************
@@ -137,6 +143,14 @@ static uint8_t _compute_operator_count(uint8_t cpu_count);
 static uint32_t _compute_ring_capacity(void);
 
 /**
+ * @brief Resolve each operator's client-slot cap, once, at worker init.
+ *
+ * @return A validated cap: DB_SERVER_MAX_CLIENTS if set and valid (8..255), otherwise
+ *         WORKER_MAX_CLIENTS (the compile-time default).
+ */
+static uint32_t _compute_max_clients(void);
+
+/**
  * @brief Select the least-loaded operator using relaxed atomics.
  *
  * Implements a fast path for lightly loaded operators below the blind assignment limit.
@@ -166,6 +180,7 @@ int worker_init(uint8_t cpu_count)
 
     /* Resolved once, here, and passed to every operator — not re-read per operator. */
     const uint32_t ring_capacity = _compute_ring_capacity();
+    _worker.max_clients          = _compute_max_clients();
 
     /* Allocate an operator for each cpu available for operators */
     _worker.operators = calloc(_worker.operators_count, sizeof(operator_t));
@@ -186,7 +201,7 @@ int worker_init(uint8_t cpu_count)
     /* Initialize each operator */
     for(uint8_t op_idx = 0; op_idx < _worker.operators_count; ++op_idx)
     {
-        if(operator_init(&_worker.operators[op_idx], op_idx, ring_capacity) != STATUS_SUCCESS)
+        if(operator_init(&_worker.operators[op_idx], op_idx, ring_capacity, _worker.max_clients) != STATUS_SUCCESS)
         {
             EML_ERROR(LOG_TAG, "init: operator %u init failed", (unsigned)op_idx);
             goto fail;
@@ -370,6 +385,7 @@ void worker_destroy(void)
     free(_worker.operators_threads);
     _worker.operators_threads = NULL;
     _worker.operators_count   = 0;
+    _worker.max_clients       = 0;
 }
 
 /*****************************************************************************************************************************************
@@ -396,8 +412,10 @@ static operator_t* _least_loaded_operator(void)
         unsigned int queued = atomic_load_explicit(&_worker.operators[i].queued_clients, memory_order_relaxed);
         unsigned int load   = active + queued;
 
-        /* when load is below the blind assignment limit just give it to the operator */
-        if(load < BLIND_ASSIGNMENT_LIMIT_PERCENTAGE)
+        /* when load is below the blind assignment limit just give it to the operator — 10% of the
+         * ACTUAL resolved per-operator cap (DB_SERVER_MAX_CLIENTS override or the WORKER_MAX_CLIENTS
+         * default), not a compile-time constant that a runtime override would make stale. */
+        if(load < _worker.max_clients / 10U)
         {
 #ifdef DEBUG
             EML_DBG(LOG_TAG, "selecting operator %u with load=%u (active=%u queued=%u, blind)", (unsigned)i, load, active, queued);
@@ -520,4 +538,27 @@ static uint32_t _compute_ring_capacity(void)
                  (unsigned)default_capacity);
     }
     return default_capacity;
+}
+
+static uint32_t _compute_max_clients(void)
+{
+    /* Bounds mirror config_validate.c's _validate_max_clients_env() (8..255) — keep both in sync if
+     * either changes. WORKER_MAX_CLIENTS is a compile-time default sized for the box this project
+     * targets; the memory cost of raising it is trivial (client_t is dominated by its 32 KiB read
+     * buffer), so this is a plain explicit override, not an adaptive/heuristic formula — same shape
+     * as DB_SERVER_WORKERS / DB_SERVER_RING_CAPACITY above. */
+    const char* env = getenv("DB_SERVER_MAX_CLIENTS");
+    if(env && env[0] != '\0')
+    {
+        char* end = NULL;
+        long  req = strtol(env, &end, 10);
+        if(end && *end == '\0' && req >= 8 && req <= 255)
+        {
+            EML_INFO(LOG_TAG, "DB_SERVER_MAX_CLIENTS override: %ld (default would be %u)", req, (unsigned)WORKER_MAX_CLIENTS);
+            return (uint32_t)req;
+        }
+        EML_WARN(LOG_TAG, "DB_SERVER_MAX_CLIENTS='%s' invalid (want an integer 8..255) — using default %u", env,
+                 (unsigned)WORKER_MAX_CLIENTS);
+    }
+    return (uint32_t)WORKER_MAX_CLIENTS;
 }

@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -120,9 +121,9 @@ static void _operator_set_timer(operator_t* op, uint32_t freq);
  *****************************************************************************************************************************************
  */
 
-int operator_init(operator_t* op, uint8_t id, uint32_t ring_capacity)
+int operator_init(operator_t* op, uint8_t id, uint32_t ring_capacity, uint32_t max_clients)
 {
-    if(op == NULL)
+    if(op == NULL || max_clients == 0u)
     {
         EML_ERROR(LOG_TAG, "init: invalid input");
         goto fail;
@@ -139,6 +140,18 @@ int operator_init(operator_t* op, uint8_t id, uint32_t ring_capacity)
     /* Initialize active/queued clients counts */
     atomic_store(&op->active_clients, 0);
     atomic_store(&op->queued_clients, 0);
+
+    /* Client slots — calloc'd to the resolved runtime cap (DB_SERVER_MAX_CLIENTS or the
+     * WORKER_MAX_CLIENTS default), same allocation style as worker.c's operators[] array. Set
+     * max_clients BEFORE any fail path so operator_shutdown() (which bounds its cleanup loop on it)
+     * never scans past what was actually requested, even on a partial-init failure below. */
+    op->max_clients = max_clients;
+    op->clients      = calloc(max_clients, sizeof(client_t));
+    if(!op->clients)
+    {
+        EML_ERROR(LOG_TAG, "init: clients allocation failed (max_clients=%u)", (unsigned)max_clients);
+        goto fail;
+    }
 
     /* Initialize spsc ring */
     op->ring = spsc_ring_init(ring_capacity);
@@ -217,7 +230,7 @@ void* operator_thread(void* arg)
      * THIS pinned thread's node instead of the boot thread's. The stream gate (§9.4) lets POST
      * /api/app/files bypass body buffering into the upload pump. */
     int init_failed = 0;
-    for(size_t cli_idx = 0; cli_idx < WORKER_MAX_CLIENTS; cli_idx++)
+    for(size_t cli_idx = 0; cli_idx < op->max_clients; cli_idx++)
     {
         if(db_http_parser_init(&op->clients[cli_idx].http_parser) != DB_http_status_OK ||
            db_http_parser_set_stream_gate(op->clients[cli_idx].http_parser, upload_stream_gate, NULL) != DB_http_status_OK)
@@ -338,13 +351,19 @@ void operator_shutdown(operator_t* op)
         op->timer_fd = -1;
     }
 
-    /* Clean the clients and their parser handles. */
-    for(size_t i = 0; i < WORKER_MAX_CLIENTS; i++)
+    /* Clean the clients and their parser handles, then free the calloc'd slot array itself. */
+    if(op->clients)
     {
-        client_shutdown(&op->clients[i]);
-        db_http_parser_kill(op->clients[i].http_parser);
-        op->clients[i].http_parser = NULL;
+        for(size_t i = 0; i < op->max_clients; i++)
+        {
+            client_shutdown(&op->clients[i]);
+            db_http_parser_kill(op->clients[i].http_parser);
+            op->clients[i].http_parser = NULL;
+        }
+        free(op->clients);
+        op->clients = NULL;
     }
+    op->max_clients = 0u;
 
     /* Clean reactor */
     reactor_shutdown(&op->reactor);
@@ -464,7 +483,7 @@ static int _operator_handle_timer_event(int fd, fd_ctx_t* ctx)
 
 static client_t* _get_available_client_slot(operator_t* op)
 {
-    for(uint8_t i = 0; i < WORKER_MAX_CLIENTS; ++i)
+    for(uint32_t i = 0; i < op->max_clients; ++i)
     {
         if(!op->clients[i].is_busy)
         {
@@ -572,7 +591,7 @@ static int _operator_remove_client_by_fd(operator_t* op, int client_fd)
 {
     /* find client by fd */
     unsigned int idx;
-    for(idx = 0; idx < WORKER_MAX_CLIENTS; ++idx)
+    for(idx = 0; idx < op->max_clients; ++idx)
     {
         if(op->clients[idx].is_busy && op->clients[idx].ctx.fd == client_fd)
         {
@@ -580,7 +599,7 @@ static int _operator_remove_client_by_fd(operator_t* op, int client_fd)
         }
     }
 
-    if(idx >= WORKER_MAX_CLIENTS)
+    if(idx >= op->max_clients)
     {
         EML_ERROR(LOG_TAG, "[op %d] _remove_client_by_fd: no client slot found for fd %d", op->id, client_fd);
         return STATUS_FAILURE;
@@ -697,7 +716,7 @@ static void _operator_status_update(operator_t* op)
     unsigned int active_clients = atomic_load_explicit(&op->active_clients, memory_order_relaxed);
 
     /* Update operator status */
-    if(active_clients >= WORKER_MAX_CLIENTS && op->status != OPERATOR_STATUS_FULL)
+    if(active_clients >= op->max_clients && op->status != OPERATOR_STATUS_FULL)
     {
         op->status = OPERATOR_STATUS_FULL;
 #ifdef DEBUG
@@ -705,7 +724,7 @@ static void _operator_status_update(operator_t* op)
 #endif /* DEBUG */
     }
 
-    if(active_clients < WORKER_MAX_CLIENTS && op->status != OPERATOR_STATUS_ACTIVE)
+    if(active_clients < op->max_clients && op->status != OPERATOR_STATUS_ACTIVE)
     {
         op->status = OPERATOR_STATUS_ACTIVE;
 #ifdef DEBUG
@@ -748,10 +767,10 @@ static void _clean_clients(operator_t* op)
      * array, so a live client can sit at an index >= active_clients (e.g. slot 0 removed while
      * slot 1 stays busy drops active_clients to 1, and — worse — active_clients can shrink again
      * mid-scan as this very loop removes an earlier slot, cutting the old bound short before it
-     * ever reached a later, still-expired slot in the same pass). WORKER_MAX_CLIENTS (64) per
-     * operator is small enough that a full bounded scan every housekeeping tick is cheap
-     * (docs/DB_APP_MAINTENANCE.md's timeout-scanning review). */
-    for(unsigned int cli_idx = 0; cli_idx < WORKER_MAX_CLIENTS; cli_idx++)
+     * ever reached a later, still-expired slot in the same pass). op->max_clients (64 by default,
+     * DB_SERVER_MAX_CLIENTS-overridable) per operator is small enough that a full bounded scan every
+     * housekeeping tick is cheap (docs/DB_APP_MAINTENANCE.md's timeout-scanning review). */
+    for(unsigned int cli_idx = 0; cli_idx < op->max_clients; cli_idx++)
     {
         if(!op->clients[cli_idx].is_busy) continue;
 
