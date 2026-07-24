@@ -743,7 +743,15 @@ static void _operator_timer_update(operator_t* op)
 static void _clean_clients(operator_t* op)
 {
     uint64_t now = (uint64_t)time_helper_get_now();
-    for(unsigned int cli_idx = 0; cli_idx < op->active_clients; cli_idx++)
+    /* Must scan every slot, not just indices below active_clients: client removal
+     * (client.c's client_shutdown()) frees a slot by clearing is_busy without compacting the
+     * array, so a live client can sit at an index >= active_clients (e.g. slot 0 removed while
+     * slot 1 stays busy drops active_clients to 1, and — worse — active_clients can shrink again
+     * mid-scan as this very loop removes an earlier slot, cutting the old bound short before it
+     * ever reached a later, still-expired slot in the same pass). WORKER_MAX_CLIENTS (64) per
+     * operator is small enough that a full bounded scan every housekeeping tick is cheap
+     * (docs/DB_APP_MAINTENANCE.md's timeout-scanning review). */
+    for(unsigned int cli_idx = 0; cli_idx < WORKER_MAX_CLIENTS; cli_idx++)
     {
         if(!op->clients[cli_idx].is_busy) continue;
 
