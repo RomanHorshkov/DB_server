@@ -49,7 +49,11 @@ name: CI
 #     |                      worker_dispatch_to_operator SPSC push ->
 #     |                      operator epoll wakeup -> response path; this
 #     |                      existed in the repo but was never wired into
-#     |                      CI at all)
+#     |                      CI at all — plus tests/config_validation_test.sh,
+#     |                      which boots the same real binary against several
+#     |                      bad configs and one valid one, proving
+#     |                      config_validate_startup() actually gates
+#     |                      server_init())
 #     +--> package         (release + audit build, needs all four verdicts)
 #
 # Each needs:-build job re-checks-out and re-builds the full nine-repo
@@ -145,6 +149,11 @@ jobs:
         run: |
           cd DB_server
           ./tests/spsc_dispatch_load_test.sh
+
+      - name: DB_server — config_validation_test.sh (boots the real binary, bad + valid configs)
+        run: |
+          cd DB_server
+          ./tests/config_validation_test.sh
 
   package:
     name: Package (release + audit) + install
