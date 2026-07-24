@@ -96,7 +96,20 @@ typedef enum
  * Each worker consumes one DB_app transaction slot ABOVE the operators' [0, ops) range. */
 #define WORKER_UPLOAD_COUNT                          4U
 
+/* Queue depth beyond the busy workers — the "+ WORKER_UPLOAD_QUEUE_DEPTH" half of the concurrency formula
+ * above. Past (WORKER_UPLOAD_COUNT + WORKER_UPLOAD_QUEUE_DEPTH) concurrent uploads, upload_worker_dispatch()
+ * rejects and the caller answers 503 upload_busy. Mirrors upload_worker.c's physical UPLOAD_QUEUE_MAX (the
+ * hard array bound) — keep both in sync if either changes. */
+#define WORKER_UPLOAD_QUEUE_DEPTH                    32U
+
 /* Absolute wall-clock ceiling for one upload, CLOCK_MONOTONIC (defeats a forever-slow-but-never-idle client). */
 #define WORKER_UPLOAD_MAX_WALL_S                     7200U /* 2 h — a 4 GiB upload at ~600 KiB/s still fits */
+
+/* DB_SERVER_UPLOAD_WORKERS / DB_SERVER_UPLOAD_QUEUE_DEPTH: optional env overrides for the two constants
+ * above, following the same explicit-override pattern as DB_SERVER_WORKERS / DB_SERVER_RING_CAPACITY
+ * (worker.c). Validated fail-closed at startup by config_validate.c; applied in core.c. Their purpose is a
+ * deterministically small pool for test/CI (e.g. DB_SERVER_UPLOAD_WORKERS=1 DB_SERVER_UPLOAD_QUEUE_DEPTH=1
+ * makes the 503 upload_busy cap fire at the 3rd concurrent upload instead of needing dozens to reliably
+ * outrace production-sized headroom) — production leaves both unset and gets the constants above. */
 
 #endif /* SERVER_CONFIG_CORE_H */

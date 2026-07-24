@@ -38,9 +38,11 @@
  * @param[in] worker_no_base First DB_app transaction slot for this pool — MUST NOT overlap the operators'
  *                           slots [0, ops). Workers use worker_no_base + i, so db_app_init() must have been
  *                           called with (ops + n_workers) slots.
+ * @param[in] queue_depth    Bounded queue depth beyond the busy workers (1..the pool's physical max).
+ *                           Past (n_workers + queue_depth) concurrent uploads, dispatch rejects (503).
  * @return 0 on success, -1 on failure.
  */
-int upload_workers_init(uint8_t n_workers, uint8_t worker_no_base);
+int upload_workers_init(uint8_t n_workers, uint8_t worker_no_base, uint16_t queue_depth);
 
 /**
  * @brief Hand an accepted upload connection to the pool.

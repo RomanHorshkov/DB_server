@@ -100,6 +100,10 @@ static void _core_logger_bootstrap(void);
 
 static uint8_t _core_detect_cpu_count(void);
 
+static unsigned _compute_upload_worker_count(void);
+
+static unsigned _compute_upload_queue_depth(void);
+
 #ifdef DEBUG
 static void _p_dbg_info_init(void);
 #endif
@@ -177,7 +181,7 @@ int server_init(const char* api_spec, const char* upload_spec)
      * Upload workers use slots ABOVE the operators' [0, ops) range and must never overlap them. Range-check the
      * SUM before narrowing to uint8_t (db_app_init's parameter type). */
     const unsigned operators     = (unsigned)worker_get_operators_count();
-    const unsigned upload_workers = upload_enabled ? (unsigned)WORKER_UPLOAD_COUNT : 0u;
+    const unsigned upload_workers = upload_enabled ? _compute_upload_worker_count() : 0u;
     const unsigned total_slots    = operators + upload_workers;
     if(operators == 0u || total_slots > 255u)
     {
@@ -196,7 +200,7 @@ int server_init(const char* api_spec, const char* upload_spec)
      * [operators, operators + upload_workers). */
     if(upload_enabled)
     {
-        if(upload_workers_init((uint8_t)upload_workers, (uint8_t)operators) != 0)
+        if(upload_workers_init((uint8_t)upload_workers, (uint8_t)operators, (uint16_t)_compute_upload_queue_depth()) != 0)
         {
             EML_ERROR(LOG_TAG, "upload worker pool failed to init.");
             goto fail;
@@ -284,6 +288,50 @@ static uint8_t _core_detect_cpu_count(void)
     }
 
     return (uint8_t)cpus;
+}
+
+/** @brief Bound mirrors upload_worker.c's private UPLOAD_MAX_WORKERS (16) — keep both in sync if either
+ *         changes. DB_SERVER_UPLOAD_WORKERS overrides (trusted input — env set by the unit/operator), same
+ *         pattern as worker.c's _compute_operator_count()/DB_SERVER_WORKERS. A deterministically tiny pool
+ *         (e.g. =1) is what lets a test suite force + verify the 503 upload_busy cap without racing a
+ *         production-sized headroom (docs/HARDENING_TODO.md). */
+static unsigned _compute_upload_worker_count(void)
+{
+    const unsigned default_count = (unsigned)WORKER_UPLOAD_COUNT;
+    const char*    env           = getenv("DB_SERVER_UPLOAD_WORKERS");
+    if(env && env[0] != '\0')
+    {
+        char* end = NULL;
+        long  req = strtol(env, &end, 10);
+        if(end && *end == '\0' && req >= 1 && req <= 16)
+        {
+            EML_INFO(LOG_TAG, "DB_SERVER_UPLOAD_WORKERS override: %ld upload worker(s) (default %u)", req, default_count);
+            return (unsigned)req;
+        }
+        EML_WARN(LOG_TAG, "DB_SERVER_UPLOAD_WORKERS='%s' invalid (want an integer 1..16) — using default %u", env, default_count);
+    }
+    return default_count;
+}
+
+/** @brief Bound mirrors upload_worker.c's private UPLOAD_QUEUE_MAX (32) — keep both in sync if either
+ *         changes. DB_SERVER_UPLOAD_QUEUE_DEPTH overrides, same pattern as _compute_upload_worker_count()
+ *         above. */
+static unsigned _compute_upload_queue_depth(void)
+{
+    const unsigned default_depth = (unsigned)WORKER_UPLOAD_QUEUE_DEPTH;
+    const char*    env           = getenv("DB_SERVER_UPLOAD_QUEUE_DEPTH");
+    if(env && env[0] != '\0')
+    {
+        char* end = NULL;
+        long  req = strtol(env, &end, 10);
+        if(end && *end == '\0' && req >= 1 && req <= 32)
+        {
+            EML_INFO(LOG_TAG, "DB_SERVER_UPLOAD_QUEUE_DEPTH override: %ld (default %u)", req, default_depth);
+            return (unsigned)req;
+        }
+        EML_WARN(LOG_TAG, "DB_SERVER_UPLOAD_QUEUE_DEPTH='%s' invalid (want an integer 1..32) — using default %u", env, default_depth);
+    }
+    return default_depth;
 }
 
 #ifdef DEBUG

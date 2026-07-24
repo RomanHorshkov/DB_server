@@ -31,6 +31,8 @@ static int _validate_unix_path(const char* label, const char* path);
 static int _validate_listen_spec(const char* label, const char* spec);
 static int _validate_workers_env(void);
 static int _validate_ring_capacity_env(void);
+static int _validate_upload_workers_env(void);
+static int _validate_upload_queue_depth_env(void);
 
 /*****************************************************************************************************************************************
  * PUBLIC FUNCTIONS DEFINITIONS
@@ -54,6 +56,14 @@ int config_validate_startup(const char* api_spec, const char* upload_spec)
         valid = 0;
     }
     if(_validate_ring_capacity_env() != STATUS_SUCCESS)
+    {
+        valid = 0;
+    }
+    if(_validate_upload_workers_env() != STATUS_SUCCESS)
+    {
+        valid = 0;
+    }
+    if(_validate_upload_queue_depth_env() != STATUS_SUCCESS)
     {
         valid = 0;
     }
@@ -191,6 +201,48 @@ static int _validate_ring_capacity_env(void)
     if(errno != 0 || end == env || *end != '\0' || val < 8 || val > 1024 || (val & (val - 1)) != 0)
     {
         EML_ERROR(LOG_TAG, "DB_SERVER_RING_CAPACITY='%s' is invalid (want a power of two in 8..1024)", env);
+        return STATUS_FAILURE;
+    }
+    return STATUS_SUCCESS;
+}
+
+/** @brief Bound mirrors core.c's _compute_upload_worker_count() (1..16) — keep both in sync if either
+ *         changes. */
+static int _validate_upload_workers_env(void)
+{
+    const char* env = getenv("DB_SERVER_UPLOAD_WORKERS");
+    if(!env || env[0] == '\0')
+    {
+        return STATUS_SUCCESS;
+    }
+
+    errno          = 0;
+    char*     end  = NULL;
+    const long val = strtol(env, &end, 10);
+    if(errno != 0 || end == env || *end != '\0' || val < 1 || val > 16)
+    {
+        EML_ERROR(LOG_TAG, "DB_SERVER_UPLOAD_WORKERS='%s' is invalid (want an integer 1..16)", env);
+        return STATUS_FAILURE;
+    }
+    return STATUS_SUCCESS;
+}
+
+/** @brief Bound mirrors core.c's _compute_upload_queue_depth() (1..32) — keep both in sync if either
+ *         changes. */
+static int _validate_upload_queue_depth_env(void)
+{
+    const char* env = getenv("DB_SERVER_UPLOAD_QUEUE_DEPTH");
+    if(!env || env[0] == '\0')
+    {
+        return STATUS_SUCCESS;
+    }
+
+    errno          = 0;
+    char*     end  = NULL;
+    const long val = strtol(env, &end, 10);
+    if(errno != 0 || end == env || *end != '\0' || val < 1 || val > 32)
+    {
+        EML_ERROR(LOG_TAG, "DB_SERVER_UPLOAD_QUEUE_DEPTH='%s' is invalid (want an integer 1..32)", env);
         return STATUS_FAILURE;
     }
     return STATUS_SUCCESS;

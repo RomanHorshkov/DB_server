@@ -64,6 +64,7 @@ typedef struct
     int             q_head;
     int             q_tail;
     int             q_count;
+    int             q_max;    /* active queue depth <= UPLOAD_QUEUE_MAX; see upload_workers_init() */
     int             running;
     pthread_mutex_t lock;
     pthread_cond_t  cv;
@@ -210,11 +211,16 @@ static void* _worker_main(void* arg)
  *****************************************************************************************************************************************
  */
 
-int upload_workers_init(uint8_t n_workers, uint8_t worker_no_base)
+int upload_workers_init(uint8_t n_workers, uint8_t worker_no_base, uint16_t queue_depth)
 {
     if(n_workers == 0u || n_workers > UPLOAD_MAX_WORKERS)
     {
         EML_ERROR(LOG_TAG, "init: n_workers %u out of range (1..%u)", (unsigned)n_workers, UPLOAD_MAX_WORKERS);
+        return -1;
+    }
+    if(queue_depth == 0u || queue_depth > UPLOAD_QUEUE_MAX)
+    {
+        EML_ERROR(LOG_TAG, "init: queue_depth %u out of range (1..%u)", (unsigned)queue_depth, UPLOAD_QUEUE_MAX);
         return -1;
     }
     if(_pool.running)
@@ -226,6 +232,7 @@ int upload_workers_init(uint8_t n_workers, uint8_t worker_no_base)
     _pool.n_workers      = n_workers;
     _pool.worker_no_base = worker_no_base;
     _pool.q_head = _pool.q_tail = _pool.q_count = 0;
+    _pool.q_max                                 = (int)queue_depth;
     _pool.running                               = 1;
     if(pthread_mutex_init(&_pool.lock, NULL) != 0 || pthread_cond_init(&_pool.cv, NULL) != 0)
     {
@@ -244,8 +251,8 @@ int upload_workers_init(uint8_t n_workers, uint8_t worker_no_base)
             return -1;
         }
     }
-    EML_INFO(LOG_TAG, "upload pool ready (%u workers, db slots %u..%u, queue %u)", (unsigned)n_workers, (unsigned)worker_no_base,
-             (unsigned)(worker_no_base + n_workers - 1u), UPLOAD_QUEUE_MAX);
+    EML_INFO(LOG_TAG, "upload pool ready (%u workers, db slots %u..%u, queue %d)", (unsigned)n_workers, (unsigned)worker_no_base,
+             (unsigned)(worker_no_base + n_workers - 1u), _pool.q_max);
     return 0;
 }
 
@@ -256,10 +263,10 @@ int upload_worker_dispatch(int fd)
         return -1;
     }
     pthread_mutex_lock(&_pool.lock);
-    if(_pool.q_count >= UPLOAD_QUEUE_MAX)
+    if(_pool.q_count >= _pool.q_max)
     {
         pthread_mutex_unlock(&_pool.lock);
-        EML_WARN(LOG_TAG, "upload queue saturated (%d) — rejecting fd %d", UPLOAD_QUEUE_MAX, fd);
+        EML_WARN(LOG_TAG, "upload queue saturated (%d) — rejecting fd %d", _pool.q_max, fd);
         return -1; /* caller answers 503 + closes */
     }
     _pool.queue[_pool.q_tail] = fd;

@@ -56,6 +56,16 @@ static void test_ring_capacity_env_unset_is_valid(void** state);
 static void test_ring_capacity_env_valid_power_of_two_accepted(void** state);
 static void test_ring_capacity_env_non_power_of_two_rejected(void** state);
 static void test_ring_capacity_env_out_of_range_rejected(void** state);
+static void test_upload_workers_env_unset_is_valid(void** state);
+static void test_upload_workers_env_valid_integer_accepted(void** state);
+static void test_upload_workers_env_zero_rejected(void** state);
+static void test_upload_workers_env_out_of_range_rejected(void** state);
+static void test_upload_workers_env_non_numeric_rejected(void** state);
+static void test_upload_queue_depth_env_unset_is_valid(void** state);
+static void test_upload_queue_depth_env_valid_integer_accepted(void** state);
+static void test_upload_queue_depth_env_zero_rejected(void** state);
+static void test_upload_queue_depth_env_out_of_range_rejected(void** state);
+static void test_upload_queue_depth_env_non_numeric_rejected(void** state);
 
 /*****************************************************************************************************************************************
  * PRIVATE FUNCTIONS DEFINITIONS
@@ -67,6 +77,8 @@ static int _setup_clears_env(void** state)
     (void)state;
     unsetenv("DB_SERVER_WORKERS");
     unsetenv("DB_SERVER_RING_CAPACITY");
+    unsetenv("DB_SERVER_UPLOAD_WORKERS");
+    unsetenv("DB_SERVER_UPLOAD_QUEUE_DEPTH");
     return 0;
 }
 
@@ -223,6 +235,82 @@ static void test_ring_capacity_env_out_of_range_rejected(void** state)
     assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
 }
 
+static void test_upload_workers_env_unset_is_valid(void** state)
+{
+    (void)state;
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+}
+
+static void test_upload_workers_env_valid_integer_accepted(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_UPLOAD_WORKERS", "1", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+    setenv("DB_SERVER_UPLOAD_WORKERS", "16", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+}
+
+static void test_upload_workers_env_zero_rejected(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_UPLOAD_WORKERS", "0", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+}
+
+static void test_upload_workers_env_out_of_range_rejected(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_UPLOAD_WORKERS", "17", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+    setenv("DB_SERVER_UPLOAD_WORKERS", "-1", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+}
+
+static void test_upload_workers_env_non_numeric_rejected(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_UPLOAD_WORKERS", "banana", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+}
+
+static void test_upload_queue_depth_env_unset_is_valid(void** state)
+{
+    (void)state;
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+}
+
+static void test_upload_queue_depth_env_valid_integer_accepted(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_UPLOAD_QUEUE_DEPTH", "1", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+    setenv("DB_SERVER_UPLOAD_QUEUE_DEPTH", "32", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_SUCCESS);
+}
+
+static void test_upload_queue_depth_env_zero_rejected(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_UPLOAD_QUEUE_DEPTH", "0", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+}
+
+static void test_upload_queue_depth_env_out_of_range_rejected(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_UPLOAD_QUEUE_DEPTH", "33", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+    setenv("DB_SERVER_UPLOAD_QUEUE_DEPTH", "-1", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+}
+
+static void test_upload_queue_depth_env_non_numeric_rejected(void** state)
+{
+    (void)state;
+    setenv("DB_SERVER_UPLOAD_QUEUE_DEPTH", "banana", 1);
+    assert_int_equal(config_validate_startup(NULL, NULL), STATUS_FAILURE);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -245,6 +333,16 @@ int main(void)
         cmocka_unit_test_setup(test_ring_capacity_env_valid_power_of_two_accepted, _setup_clears_env),
         cmocka_unit_test_setup(test_ring_capacity_env_non_power_of_two_rejected, _setup_clears_env),
         cmocka_unit_test_setup(test_ring_capacity_env_out_of_range_rejected, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_workers_env_unset_is_valid, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_workers_env_valid_integer_accepted, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_workers_env_zero_rejected, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_workers_env_out_of_range_rejected, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_workers_env_non_numeric_rejected, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_queue_depth_env_unset_is_valid, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_queue_depth_env_valid_integer_accepted, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_queue_depth_env_zero_rejected, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_queue_depth_env_out_of_range_rejected, _setup_clears_env),
+        cmocka_unit_test_setup(test_upload_queue_depth_env_non_numeric_rejected, _setup_clears_env),
     };
     return cmocka_run_group_tests_name("config_validate", tests, NULL, NULL);
 }
