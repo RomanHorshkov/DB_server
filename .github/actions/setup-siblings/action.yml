@@ -12,6 +12,11 @@ description: >
   explicit artifact upload/download; a composite action only de-duplicates
   the YAML, not the compute.
 
+inputs:
+  sibling-token:
+    description: SIBLING_REPOS_PAT (or GITHUB_TOKEN fallback), passed explicitly — composite actions cannot read the secrets context directly.
+    required: true
+
 runs:
   using: composite
   steps:
@@ -20,7 +25,7 @@ runs:
       with:
         repository: RomanHorshkov/DB_app
         path: DB_app
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout DB_http (sibling — DB_server links its release build)
@@ -28,7 +33,7 @@ runs:
       with:
         repository: RomanHorshkov/DB_http
         path: DB_http
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout DB_lmdb (sibling — DB_app and DB_server both link it)
@@ -36,7 +41,7 @@ runs:
       with:
         repository: RomanHorshkov/DB_lmdb
         path: DB_lmdb
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout DB_jose (sibling — DB_app and DB_server both link it)
@@ -44,7 +49,7 @@ runs:
       with:
         repository: RomanHorshkov/DB_jose
         path: DB_jose
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout EMlog (sibling — DB_app/DB_jose/DB_lmdb/DB_server all need it)
@@ -52,7 +57,7 @@ runs:
       with:
         repository: RomanHorshkov/EMlog
         path: EMlog
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout uuid7 (sibling — DB_app/DB_lmdb/DB_server all need it)
@@ -60,7 +65,7 @@ runs:
       with:
         repository: RomanHorshkov/uuid7
         path: uuid7
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout MPSCring (sibling — DB_app and DB_server both link it)
@@ -68,7 +73,7 @@ runs:
       with:
         repository: RomanHorshkov/MPSCring
         path: MPSCring
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout SPSCring (sibling — DB_server links it directly)
@@ -76,7 +81,7 @@ runs:
       with:
         repository: RomanHorshkov/SPSCring
         path: SPSCring
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout fs_util (sibling — DB_lmdb compiles its source directly)
@@ -84,7 +89,7 @@ runs:
       with:
         repository: RomanHorshkov/fs_util
         path: fs_util
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Checkout Utils (sibling — DB_jose and DB_app both include <utils/*.h>)
@@ -92,7 +97,7 @@ runs:
       with:
         repository: RomanHorshkov/Utils
         path: Utils
-        token: ${{ env.SIBLING_REPOS_TOKEN }}
+        token: ${{ inputs.sibling-token }}
         persist-credentials: false
 
     - name: Install apt dependencies

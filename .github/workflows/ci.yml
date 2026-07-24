@@ -22,23 +22,29 @@ name: CI
 # itself is public, but every sibling it links except SPSCring/fs_util/Utils
 # is private, so the checkout of the first private one 404s without it.
 #
-# Shaped as three independent, fully parallel jobs — same house pattern as
-# EMlog/uuid7/SPSCring/MPSCring's quality.yml, adapted to DB_server's actual
-# dependency depth. Each job re-checks-out and re-builds the full nine-repo
-# sibling chain via the local `setup-siblings` composite action (a composite
-# action, not a reusable workflow, because its whole job is to leave built
-# libraries on THIS job's filesystem for the steps that follow — jobs never
-# share a filesystem without an explicit artifact upload/download, so this
-# is real duplicated build time, not shared state). None of the three needs:
-# the others — they only share a recreated starting point, not each other's
-# output — so they run concurrently instead of gating one another:
+# Shaped as a graph, not one monolithic job — same house pattern as
+# EMlog/uuid7/SPSCring/MPSCring's quality.yml:
 #
-#   quality-db-app   — DB_app's own full build+test pipeline (validates the
-#                       heaviest, most-changed dependency in isolation)
-#   build-db-server  — DB_app build-only (fast, no tests — DB_server only
-#                       needs the .a/.so to link) + DB_server build
-#                       (release+audit) + package
-#   test-db-server   — DB_app build-only + DB_server's own test suite
+#   build (DB_app + siblings build-only, fast fail-first gate)
+#     +-- quality-db-app  — DB_app's own full build+test pipeline
+#     +-- build-db-server — DB_server build (release+audit) + package
+#     +-- test-db-server  — DB_server's own test suite
+#
+# Each of the three needs:-build jobs re-checks-out and re-builds the full
+# nine-repo sibling chain via the local `setup-siblings` composite action (a
+# composite action, not a reusable workflow, because its whole job is to
+# leave built libraries on THIS job's filesystem for the steps that follow —
+# jobs never share a filesystem without an explicit artifact upload/download,
+# so this is real duplicated build time, not shared state). `build` earns
+# its keep as a single fast fail point (does the whole sibling chain even
+# still compile?) before spending three jobs' worth of runner time in
+# parallel finding that out separately.
+#
+# setup-siblings takes the PAT as an explicit `sibling-token` INPUT, not a
+# job-level env var it reads on its own — composite actions cannot read the
+# `secrets` context directly, and env-var inheritance into composite steps is
+# not something to rely on being obvious; passing it as a declared input is
+# the unambiguous mechanism.
 
 on:
   push:
@@ -53,12 +59,10 @@ permissions:
   contents: read
 
 jobs:
-  quality-db-app:
-    name: DB_app — build + full test pipeline
+  build:
+    name: Build (DB_app + siblings)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      SIBLING_REPOS_TOKEN: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
+    timeout-minutes: 20
     steps:
       - name: Checkout DB_server
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -68,6 +72,30 @@ jobs:
 
       - name: Setup siblings (checkout + build + install)
         uses: ./DB_server/.github/actions/setup-siblings
+        with:
+          sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: DB_app — build libraries only
+        run: |
+          cd DB_app
+          ./utils/run_pipeline.sh build
+
+  quality-db-app:
+    name: DB_app — build + full test pipeline
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout DB_server
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: DB_server
+          persist-credentials: false
+
+      - name: Setup siblings (checkout + build + install)
+        uses: ./DB_server/.github/actions/setup-siblings
+        with:
+          sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
 
       - name: DB_app — build libraries, build+run tests (all profiles)
         run: |
@@ -88,10 +116,9 @@ jobs:
 
   build-db-server:
     name: Build DB_server (release + audit) + package
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      SIBLING_REPOS_TOKEN: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout DB_server
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -101,6 +128,8 @@ jobs:
 
       - name: Setup siblings (checkout + build + install)
         uses: ./DB_server/.github/actions/setup-siblings
+        with:
+          sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
 
       # Only the library is needed here (to link DB_server), not DB_app's
       # own test verdict — that's quality-db-app's job, running in parallel.
@@ -126,10 +155,9 @@ jobs:
 
   test-db-server:
     name: DB_server — test suite (release)
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      SIBLING_REPOS_TOKEN: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout DB_server
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -139,6 +167,8 @@ jobs:
 
       - name: Setup siblings (checkout + build + install)
         uses: ./DB_server/.github/actions/setup-siblings
+        with:
+          sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
 
       - name: DB_app — build libraries only
         run: |
