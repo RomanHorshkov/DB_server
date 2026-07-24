@@ -148,6 +148,20 @@ runs:
       shell: bash
       run: sudo ldconfig
 
+    # DB_http: needs Utils already installed (previous step — db_http_project.sh
+    # hard-requires utils/memory_macros.h + utils/string_view.h to build at
+    # all). MUST be actually INSTALLED, not just built in place — DB_app's
+    # request.h does a plain #include <DB_http/DB_http_types.h> with no
+    # sibling-first override in db_app_project.sh, so build_libs.sh alone
+    # (the pre-existing, never-actually-CI-tested version of this step) left
+    # the header nowhere DB_app's build could find it.
+    - name: Build + install DB_http
+      shell: bash
+      run: |
+        cd DB_http
+        ./utils/build_deb.sh
+        sudo apt-get install -y ./build/debs/db-http_*.deb
+
     - name: Build DB_jose (release) + stage its deb
       shell: bash
       run: |
@@ -159,9 +173,3 @@ runs:
       run: |
         cd DB_lmdb
         ./utils/build_libs.sh --profile release
-
-    - name: Build DB_http (release)
-      shell: bash
-      run: |
-        cd DB_http
-        ./utils/build_libs.sh release
