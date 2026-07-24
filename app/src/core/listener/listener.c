@@ -17,12 +17,15 @@
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
+#include <signal.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <db_server/core/config_core.h>
@@ -66,6 +69,15 @@ typedef struct
 
 static listener_t _listener = {0};
 
+/**
+ * @brief Shutdown-signal eventfd (SIGTERM/SIGINT self-pipe trick). File-scope, not a listener_t
+ * member: the signal handler below is only async-signal-safe if it touches nothing but this raw fd —
+ * write(2) is on the POSIX async-signal-safe list, struct field access through a pointer chain is
+ * not guaranteed to be. -1 when no handler is installed (dev/test binaries that never call
+ * _install_shutdown_signal_handler()).
+ */
+static volatile int _shutdown_efd = -1;
+
 /*****************************************************************************************************************************************
  * PRIVATE FUNCTIONS DECLARATIONS
  *****************************************************************************************************************************************
@@ -108,6 +120,16 @@ static int _register_listening_sockets(void);
 static int _handle_listen_event(int fd, fd_ctx_t* ctx);
 
 /**
+ * @brief accept()/accept4() failed with EMFILE/ENFILE (this process's fd table is exhausted). Logs
+ *        once per exhaustion streak (not once per epoll spin — the listening socket stays readable,
+ *        level-triggered, until something ELSE frees an fd, which could be seconds away under real
+ *        exhaustion) and sleeps briefly so the listener thread backs off instead of busy-spinning
+ *        epoll_wait() at 100% CPU with no way to service the ready event.
+ * @param what Short label for the log line ("API accept" / "upload accept").
+ */
+static void _backoff_on_fd_exhaustion(const char* what);
+
+/**
  * @brief Handle accept events on the UPLOAD listening socket.
  *
  * Accepts the connection and hands it to the dedicated upload worker pool. On pool saturation, answers a minimal
@@ -128,6 +150,30 @@ static int _handle_upload_listen_event(int fd, fd_ctx_t* ctx);
  * @param[in,out] l Pointer to the listener structure.
  */
 static void _stop_listener(listener_t* l);
+
+/**
+ * @brief Reactor callback for the shutdown eventfd: drains it and flips the listener to SHUTDOWN so
+ *        listener_run()'s loop exits on its next status check — the same "stop accepting NEW
+ *        connections, then unwind" contract LISTENER_STATUS_SHUTDOWN already documented but nothing
+ *        ever actually triggered (there was no SIGTERM/SIGINT handling at all before this).
+ */
+static int _handle_shutdown_event(int fd, fd_ctx_t* ctx);
+
+/**
+ * @brief The actual signal handler (SIGTERM/SIGINT). Async-signal-safe by construction: touches
+ *        nothing but a raw fd via write(2) (self-pipe/eventfd trick) — no logging, no struct access,
+ *        no malloc. The reactor thread observes the write via _handle_shutdown_event above.
+ */
+static void _sigterm_handler(int sig);
+
+/**
+ * @brief Create the shutdown eventfd, register it with the listener's reactor, and install the
+ *        SIGTERM/SIGINT handlers. Called once, at the end of a successful listener_init()/
+ *        listener_init_activated(). Non-fatal on failure (logged; the server still runs, just without
+ *        a graceful signal-triggered drain — matches this project's general "log and continue" stance
+ *        on strictly-additive hardening, never regressing a listener that otherwise initialized fine).
+ */
+static void _install_shutdown_signal_handler(listener_t* l);
 
 /*****************************************************************************************************************************************
  * PUBLIC FUNCTIONS DEFINITIONS
@@ -186,6 +232,8 @@ int listener_init(const char* api_spec, const char* upload_spec)
         return STATUS_FAILURE;
     }
 
+    _install_shutdown_signal_handler(&_listener);
+
     _listener.status = LISTENER_STATUS_ACTIVE;
     return STATUS_SUCCESS;
 }
@@ -224,6 +272,9 @@ int listener_init_activated(const sd_listen_set_t* fds)
     }
 
     EML_INFO(LOG_TAG, "listener: socket-activated (api fd=%d, upload fd=%d) — no bind/chmod/unlink", fds->api_fd, fds->upload_fd);
+
+    _install_shutdown_signal_handler(&_listener);
+
     _listener.status = LISTENER_STATUS_ACTIVE;
     return STATUS_SUCCESS;
 }
@@ -469,6 +520,25 @@ static int _register_listening_sockets(void)
     return STATUS_SUCCESS;
 }
 
+/* Set once accept()/accept4() reports EMFILE/ENFILE, cleared the next time either listener's accept
+ * succeeds — the "log once per streak" latch _backoff_on_fd_exhaustion() relies on. */
+static volatile sig_atomic_t _fd_exhaustion_warned = 0;
+
+static void _backoff_on_fd_exhaustion(const char* what)
+{
+    if(!_fd_exhaustion_warned)
+    {
+        EML_WARN(LOG_TAG, "%s: process fd table exhausted (EMFILE/ENFILE) — backing off until fds free up", what);
+        _fd_exhaustion_warned = 1;
+    }
+    /* Bounded sleep: the listening socket stays EPOLLIN-ready (level-triggered) with nothing this
+     * thread can do about it, so returning immediately would busy-spin epoll_wait() at 100% CPU for
+     * as long as the exhaustion lasts. 10ms caps that to near-zero without meaningfully delaying
+     * accepts once fds free up again. */
+    struct timespec backoff = {.tv_sec = 0, .tv_nsec = 10000000L};
+    nanosleep(&backoff, NULL);
+}
+
 static int _handle_listen_event(int fd, fd_ctx_t* ctx)
 {
     (void)ctx;
@@ -479,9 +549,15 @@ static int _handle_listen_event(int fd, fd_ctx_t* ctx)
     int client_fd = accept(fd, NULL, NULL);
     if(client_fd < 0)
     {
+        if(errno == EMFILE || errno == ENFILE)
+        {
+            _backoff_on_fd_exhaustion("API accept");
+            return STATUS_SUCCESS; /* transient — retried on the next epoll_wait, not a reactor error */
+        }
         EML_PERR(LOG_TAG, "accept failed");
         return STATUS_FAILURE;
     }
+    _fd_exhaustion_warned = 0;
 
     if(worker_dispatch_to_operator(client_fd) != STATUS_SUCCESS)
     {
@@ -524,9 +600,15 @@ static int _handle_upload_listen_event(int fd, fd_ctx_t* ctx)
         {
             return STATUS_SUCCESS; /* spurious wakeup / already drained */
         }
+        if(errno == EMFILE || errno == ENFILE)
+        {
+            _backoff_on_fd_exhaustion("upload accept");
+            return STATUS_SUCCESS; /* transient — retried on the next epoll_wait, not a reactor error */
+        }
         EML_PERR(LOG_TAG, "upload accept failed");
         return STATUS_FAILURE;
     }
+    _fd_exhaustion_warned = 0;
 
     if(upload_worker_dispatch(client_fd) == 0)
     {
@@ -539,9 +621,91 @@ static int _handle_upload_listen_event(int fd, fd_ctx_t* ctx)
     return STATUS_SUCCESS;
 }
 
+static int _handle_shutdown_event(int fd, fd_ctx_t* ctx)
+{
+    (void)ctx;
+    socket_drain(fd);
+    EML_WARN(LOG_TAG, "shutdown signal received — draining: no new connections will be accepted");
+    _listener.status = LISTENER_STATUS_SHUTDOWN;
+    return STATUS_SUCCESS;
+}
+
+static void _sigterm_handler(int sig)
+{
+    (void)sig;
+    /* Async-signal-safe: write(2) on a raw fd, nothing else. A signal arriving before the eventfd
+     * exists (can't happen — the handler is only installed after the eventfd is created and
+     * registered) or after _stop_listener() already closed it (possible on a second SIGTERM racing
+     * teardown) both degrade to a harmless EBADF, ignored here for the same async-signal-safety
+     * reason nothing else in this handler checks a return value. */
+    int fd = _shutdown_efd;
+    if(fd >= 0)
+    {
+        uint64_t one = 1U;
+        ssize_t  w   = write(fd, &one, sizeof one);
+        (void)w;
+    }
+}
+
+static void _install_shutdown_signal_handler(listener_t* l)
+{
+    int efd = eventfd(0, EFD_NONBLOCK);
+    if(efd == -1)
+    {
+        EML_PERR(LOG_TAG, "listener: shutdown eventfd creation failed — SIGTERM/SIGINT will terminate abruptly");
+        return;
+    }
+
+    fd_ctx_t* ctx = calloc(1, sizeof(*ctx));
+    if(!ctx)
+    {
+        EML_ERROR(LOG_TAG, "listener: shutdown context allocation failed — SIGTERM/SIGINT will terminate abruptly");
+        close(efd);
+        return;
+    }
+    ctx->fd      = efd;
+    ctx->owner   = l;
+    ctx->handler = _handle_shutdown_event;
+
+    if(reactor_add_in(&l->reactor, efd, ctx) != STATUS_SUCCESS)
+    {
+        EML_ERROR(LOG_TAG, "listener: shutdown eventfd registration failed — SIGTERM/SIGINT will terminate abruptly");
+        free(ctx);
+        close(efd);
+        return;
+    }
+
+    _shutdown_efd = efd;
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = _sigterm_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART; /* don't make every blocking libc call in other threads handle EINTR */
+    (void)sigaction(SIGTERM, &sa, NULL);
+    (void)sigaction(SIGINT, &sa, NULL);
+
+    EML_INFO(LOG_TAG, "listener: SIGTERM/SIGINT install a graceful drain (stop accepting, finish in-flight)");
+}
+
 static void _stop_listener(listener_t* l)
 {
     if(!l) return;
+
+    /* Restore default disposition and stop routing the signal through a (soon-to-be-closed) fd —
+     * a second SIGTERM after this point terminates the process immediately, which is the correct
+     * fallback once the graceful path has already run (or never got the chance to). */
+    struct sigaction dfl;
+    memset(&dfl, 0, sizeof dfl);
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    (void)sigaction(SIGTERM, &dfl, NULL);
+    (void)sigaction(SIGINT, &dfl, NULL);
+    if(_shutdown_efd >= 0)
+    {
+        close(_shutdown_efd);
+        _shutdown_efd = -1;
+    }
 
     for(uint32_t i = 0; i < l->active_sockets_no; ++i)
     {

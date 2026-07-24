@@ -169,6 +169,16 @@ uint8_t worker_get_operators_count(void)
     return _worker.operators_count;
 }
 
+unsigned worker_active_clients_total(void)
+{
+    unsigned total = 0u;
+    for(uint8_t i = 0; i < _worker.operators_count; ++i)
+    {
+        total += atomic_load_explicit(&_worker.operators[i].active_clients, memory_order_relaxed);
+    }
+    return total;
+}
+
 int worker_init(uint8_t cpu_count)
 {
     _worker.operators_count = _compute_operator_count(cpu_count);

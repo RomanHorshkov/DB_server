@@ -91,6 +91,21 @@ typedef enum
 #define OPERATOR_TIMER_PERIOD_LONG                   Minutes(5U)
 
 /*****************************************************************************************************************************************
+ * GRACEFUL SHUTDOWN
+ *****************************************************************************************************************************************
+ */
+
+/* Bound on server_run()'s post-listener-stop wait for operators' active_clients to drain to zero on
+ * their own (SIGTERM/SIGINT — listener.c's _install_shutdown_signal_handler()). Ordinary API requests
+ * finish in milliseconds; this exists to give a request that's mid-flight when the signal lands a real
+ * chance to complete instead of being force-closed the instant the signal is handled, while still
+ * guaranteeing termination (worker_destroy()'s hard operator_request_shutdown() runs unconditionally
+ * once this elapses, exactly as it always has). Uploads are NOT covered by this — the isolated upload
+ * pool (upload_worker.c) already drains gracefully on its own via pthread_join() on each worker's
+ * current connection, unconditionally, with no bound here needed. */
+#define SERVER_SHUTDOWN_GRACE_S                      10U
+
+/*****************************************************************************************************************************************
  * UPLOAD WORKER POOL PROPERTIES  (DB_server/README.md — upload isolation)
  *****************************************************************************************************************************************
  */

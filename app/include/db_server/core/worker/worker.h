@@ -70,4 +70,14 @@ int worker_run(void);
 
 void worker_destroy(void);
 
+/**
+ * @brief Sum of active_clients across every operator, read with relaxed atomics — a graceful-shutdown
+ *        probe (core.c's server_run()), not a load-balancing signal (that stays inside worker.c's own
+ *        _least_loaded_operator()). Safe to call at any time after a successful worker_init(); returns
+ *        0 before init or after worker_destroy().
+ *
+ * @return Total client connections currently registered across all operators.
+ */
+unsigned worker_active_clients_total(void);
+
 #endif /* SERVER_WORKER_H */

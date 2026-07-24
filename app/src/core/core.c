@@ -36,6 +36,7 @@
 #include <stdlib.h>     /* malloc(), calloc(), NULL etc */
 #include <sys/socket.h> /* socklen_t, socket(), bind(), setsockopt(), etc. */
 #include <sys/types.h>
+#include <time.h>       /* clock_gettime(), nanosleep() — graceful-shutdown grace-period wait */
 #include <unistd.h>     /* fork(), close(), pipe(), read(), write(), getlogin(), getcwd(), system() etc. */
 
 #include <emlog.h>
@@ -99,6 +100,15 @@ static server_t server;
 static void _core_logger_bootstrap(void);
 
 static uint8_t _core_detect_cpu_count(void);
+
+/**
+ * @brief Bounded wait (CLOCK_MONOTONIC) for worker_active_clients_total() to reach 0, polling
+ *        coarsely — the graceful-shutdown grace period (SERVER_SHUTDOWN_GRACE_S). Returns as soon as
+ *        the count hits 0; never blocks past @p grace_s regardless. A remaining non-zero count after
+ *        the bound is logged (not an error — worker_destroy() unconditionally force-closes whatever is
+ *        left right after this returns, exactly as it always did before this existed).
+ */
+static void _server_wait_clients_drain(uint32_t grace_s);
 
 static unsigned _compute_upload_worker_count(void);
 
@@ -228,8 +238,18 @@ void server_run(void)
     /* run operators threads */
     worker_run();
 
-    /* wait listener thread (it stops accepting new API + upload connections first) */
+    /* wait listener thread (it stops accepting new API + upload connections first — either it ran off
+     * the end because of a fatal reactor error, or listener.c's SIGTERM/SIGINT handler flipped its
+     * status to SHUTDOWN, which is the normal graceful-shutdown trigger). */
     pthread_join(server.listener_thread, NULL);
+
+    /* Graceful drain (SIGTERM/SIGINT path): the listener has already stopped accepting new API
+     * connections by the time it returns above, but existing operator clients mid-request are still
+     * being served — give them a bounded chance to finish on their own before the hard teardown below
+     * force-closes whatever is left. A clean exit (no signal ever received, e.g. a fatal listener
+     * error) also flows through here; the wait exits immediately since active_clients is normally 0 by
+     * then, so this costs nothing on that path. */
+    _server_wait_clients_drain(SERVER_SHUTDOWN_GRACE_S);
 
     /* Shutdown order (DB_server/README.md): stop the upload pool BEFORE tearing down operators and DB_app.
      * upload_workers_shutdown() drains the queue, shuts active upload sockets (waking each worker's poll so its live
@@ -262,6 +282,30 @@ static void _core_logger_bootstrap(void)
 #endif
 
     initialized = true;
+}
+
+static void _server_wait_clients_drain(uint32_t grace_s)
+{
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += (time_t)grace_s;
+
+    unsigned remaining = worker_active_clients_total();
+    while(remaining > 0u)
+    {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if(now.tv_sec > deadline.tv_sec || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
+        {
+            EML_WARN(LOG_TAG, "graceful shutdown: %u client(s) still active after %us grace period — force-closing", remaining,
+                     (unsigned)grace_s);
+            return;
+        }
+        struct timespec poll_interval = {.tv_sec = 0, .tv_nsec = 50000000L}; /* 50ms */
+        nanosleep(&poll_interval, NULL);
+        remaining = worker_active_clients_total();
+    }
+    EML_INFO(LOG_TAG, "graceful shutdown: all clients drained");
 }
 
 static uint8_t _core_detect_cpu_count(void)

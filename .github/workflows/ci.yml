@@ -53,7 +53,15 @@ name: CI
 #     |                      which boots the same real binary against several
 #     |                      bad configs and one valid one, proving
 #     |                      config_validate_startup() actually gates
-#     |                      server_init())
+#     |                      server_init(); plus tests/graceful_shutdown_test.sh
+#     |                      (SIGTERM drains in-flight work + refuses new
+#     |                      connections + exits cleanly), tests/emfile_backoff_
+#     |                      test.sh (genuine process fd exhaustion survives
+#     |                      without a busy-loop and recovers), and tests/
+#     |                      socket_activation_restart_test.sh (a service
+#     |                      restart adopts the pre-existing systemd-owned
+#     |                      listening socket without dropping queued
+#     |                      connections))
 #     +--> package         (release + audit build, needs all four verdicts)
 #
 # Each needs:-build job re-checks-out and re-builds the full nine-repo
@@ -154,6 +162,21 @@ jobs:
         run: |
           cd DB_server
           ./tests/config_validation_test.sh
+
+      - name: DB_server — graceful_shutdown_test.sh (SIGTERM drains + refuses new + exits cleanly)
+        run: |
+          cd DB_server
+          ./tests/graceful_shutdown_test.sh
+
+      - name: DB_server — emfile_backoff_test.sh (genuine fd exhaustion, no busy-loop, recovers)
+        run: |
+          cd DB_server
+          ./tests/emfile_backoff_test.sh
+
+      - name: DB_server — socket_activation_restart_test.sh (restart adopts the pre-existing socket)
+        run: |
+          cd DB_server
+          ./tests/socket_activation_restart_test.sh
 
   package:
     name: Package (release + audit) + install
