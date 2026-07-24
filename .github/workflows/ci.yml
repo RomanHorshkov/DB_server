@@ -57,11 +57,14 @@ name: CI
 #     |                      (SIGTERM drains in-flight work + refuses new
 #     |                      connections + exits cleanly), tests/emfile_backoff_
 #     |                      test.sh (genuine process fd exhaustion survives
-#     |                      without a busy-loop and recovers), and tests/
+#     |                      without a busy-loop and recovers), tests/
 #     |                      socket_activation_restart_test.sh (a service
 #     |                      restart adopts the pre-existing systemd-owned
 #     |                      listening socket without dropping queued
-#     |                      connections))
+#     |                      connections), and tests/fault_injection_startup_
+#     |                      test.sh (LD_PRELOAD fault injection — permission/
+#     |                      EMFILE/rename failures on DB_app/DB_lmdb's direct
+#     |                      fs calls fail cleanly, no corrupted state))
 #     +--> package         (release + audit build, needs all four verdicts)
 #
 # Each needs:-build job re-checks-out and re-builds the full nine-repo
@@ -177,6 +180,11 @@ jobs:
         run: |
           cd DB_server
           ./tests/socket_activation_restart_test.sh
+
+      - name: DB_server — fault_injection_startup_test.sh (permission/EMFILE/rename fail cleanly)
+        run: |
+          cd DB_server
+          ./tests/fault_injection_startup_test.sh
 
   package:
     name: Package (release + audit) + install
