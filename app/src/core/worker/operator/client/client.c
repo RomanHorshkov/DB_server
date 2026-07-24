@@ -25,6 +25,8 @@
 #include <db_server/utils/socket_helper.h>
 #include <db_server/utils/time_helper.h>
 
+#include <sys/socket.h>
+
 /*****************************************************************************************************************************************
  * PRIVATE DEFINES
  *****************************************************************************************************************************************
@@ -208,6 +210,10 @@ void client_adopt_fd(client_t* cli, int fd)
     cli->ctx.owner         = NULL;
     cli->ctx.handler       = NULL;
     cli->last_activity     = (uint64_t)time_helper_get_now();
+
+    /* Captured once here (this is the upload-pool adoption path — the operator's own
+     * _operator_add_client() does the equivalent capture for the API path). */
+    (void)socket_get_peer_ipv4(fd, &cli->remote_ip_be, &cli->remote_port_be);
 }
 
 void client_release_fd(client_t* cli)
@@ -234,6 +240,8 @@ void client_release_fd(client_t* cli)
     cli->connection_policy = 0u;
     cli->last_activity     = 0u;
     cli->request_count     = 0u;
+    cli->remote_ip_be      = 0u;
+    cli->remote_port_be    = 0u;
 }
 
 void client_shutdown(client_t* cli)
@@ -257,6 +265,8 @@ void client_shutdown(client_t* cli)
         cli->connection_policy = 0u;
         cli->last_activity     = 0u;
         cli->request_count     = 0u;
+        cli->remote_ip_be      = 0u;
+        cli->remote_port_be    = 0u;
     }
 }
 
@@ -277,9 +287,10 @@ static int _client_store_request(client_t* cli, const DB_http_request_t* req, ui
     cli->http_request.thread_id = thread_id;
     cli->http_request.timestamp = cli->last_activity;
 
-    /* TODO: populate peer address metadata when accept()/getpeername() state is wired into client_t. */
-    cli->http_request.remote_ip_be   = 0u;
-    cli->http_request.remote_port_be = 0u;
+    /* Connection-lifetime fact, captured once at adopt time (client_adopt_fd() / the operator's
+     * _operator_add_client()) — every message on this connection carries the same peer address. */
+    cli->http_request.remote_ip_be   = cli->remote_ip_be;
+    cli->http_request.remote_port_be = cli->remote_port_be;
 
     cli->connection_policy = cli->http_request.connection_policy;
     cli->request_count++;

@@ -360,6 +360,37 @@ int socket_client_init(const int* client_fd)
     return STATUS_SUCCESS;
 }
 
+int socket_get_peer_ipv4(int fd, uint32_t* out_ip_be, uint16_t* out_port_be)
+{
+    if(!out_ip_be || !out_port_be)
+    {
+        EML_ERROR(LOG_TAG, "_get_peer_ipv4: invalid input");
+        return STATUS_FAILURE;
+    }
+
+    *out_ip_be   = 0u;
+    *out_port_be = 0u;
+
+    struct sockaddr_storage peer;
+    socklen_t               peer_len = sizeof peer;
+    if(getpeername(fd, (struct sockaddr*)&peer, &peer_len) == -1)
+    {
+        /* Not fatal: an unconnected/closed/racing fd just leaves the 0 sentinel — see the header doc. */
+        return STATUS_SUCCESS;
+    }
+
+    if(peer.ss_family != AF_INET)
+    {
+        /* AF_UNIX (production transport) or AF_INET6: no uint32_t representation, sentinel stays. */
+        return STATUS_SUCCESS;
+    }
+
+    const struct sockaddr_in* sin = (const struct sockaddr_in*)&peer;
+    *out_ip_be                    = sin->sin_addr.s_addr; /* already network byte order */
+    *out_port_be                  = sin->sin_port;        /* already network byte order */
+    return STATUS_SUCCESS;
+}
+
 /*****************************************************************************************************************************************
  * PRIVATE FUNCTIONS DEFINITIONS
  *****************************************************************************************************************************************

@@ -515,6 +515,12 @@ static int _operator_add_client(operator_t* op, int client_fd)
     memset(&free_slot->http_request, 0, sizeof(free_slot->http_request));
     free_slot->buf_idx           = 0u;
     free_slot->connection_policy = 0u;
+    /* This is the API path's fd-adoption point (client_adopt_fd() is the equivalent for the upload
+     * pool) — capture the peer once here rather than at accept() time in listener.c, because the fd
+     * crosses into this thread over the SPSC dispatch ring (worker_dispatch_to_operator), which only
+     * carries a bare int; a connected socket's peer address is stable for the fd's whole lifetime, so
+     * reading it here is exactly equivalent (see socket_get_peer_ipv4()'s doc). */
+    (void)socket_get_peer_ipv4(client_fd, &free_slot->remote_ip_be, &free_slot->remote_port_be);
     /* Set client's last activity to now */
     free_slot->last_activity     = (uint64_t)time_helper_get_now();
     /* Set client's request count */

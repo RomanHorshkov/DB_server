@@ -24,6 +24,16 @@ typedef struct
     char     buf[DB_HTTP_MAX_BUFFER_LEN_B]; /**< buffer for socket reads */
     size_t   buf_idx;                       /**< cumulative bytes stored for current HTTP message */
 
+    /**
+     * @brief Peer address captured once per connection (client_adopt_fd() / the operator's
+     * _operator_add_client()), network byte order. IPv4-only (0 for AF_UNIX/AF_INET6 peers or when
+     * getpeername() fails) — see socket_get_peer_ipv4(). Copied into http_request on every message
+     * this connection sends (_client_store_request()), since DB_http clears http_request per message
+     * but the peer address is a connection-lifetime fact.
+     */
+    uint32_t remote_ip_be;
+    uint16_t remote_port_be;
+
     DB_http_request_t http_request;         /**< last parser DTO snapshot; views point into buf */
     DB_http_parser_t* http_parser;          /**< per-connection HTTP parser state */
 

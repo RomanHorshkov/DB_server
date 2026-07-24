@@ -101,6 +101,28 @@ int socket_listener_init(const int* listen_fd, const int32_t* ai_family);
  */
 int socket_client_init(const int* client_fd);
 
+/**
+ * @brief Read the connected peer's IPv4 address/port off an accepted socket, network byte order.
+ *
+ * Works on any already-connected fd — there is no accept()-time-only requirement, since a connected
+ * socket's peer address is stable for the fd's whole lifetime (getpeername() returns the same answer
+ * whether it's called right after accept() or later, from a different thread, once the fd has crossed
+ * into an operator/worker). This is how the caller propagates the real client address without needing
+ * to carry a sockaddr through the (fd-only) SPSC dispatch ring.
+ *
+ * A non-IPv4 peer (AF_UNIX — the production nginx transport — or AF_INET6) is not a failure: the
+ * DB_http_request_t contract (@c remote_ip_be) is a @c uint32_t, IPv4-only by design, so both outputs
+ * are left at the documented 0 "unknown" sentinel. getpeername() failing (bad/closed fd) is handled the
+ * same way — best-effort metadata, never a reason to drop the connection.
+ *
+ * @param[in]  fd            Connected socket fd.
+ * @param[out] out_ip_be     Receives the peer's IPv4 address in network byte order, or 0.
+ * @param[out] out_port_be   Receives the peer's TCP port in network byte order, or 0.
+ * @retval STATUS_SUCCESS Always, unless an output pointer is NULL.
+ * @retval STATUS_FAILURE @p out_ip_be or @p out_port_be is NULL.
+ */
+int socket_get_peer_ipv4(int fd, uint32_t* out_ip_be, uint16_t* out_port_be);
+
 ssize_t socket_read_nonblocking(int fd, void* buf, size_t count);
 
 #endif /* SERVER_SOCKET_HELPER_H */
