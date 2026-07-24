@@ -46,6 +46,7 @@
 
 #include <db_app.h>
 #include <db_server/core/config_core.h>
+#include <db_server/core/config_validate.h>
 #include <db_server/utils/affinity.h>
 #include <db_server/utils/socket_helper.h>
 
@@ -74,7 +75,7 @@ typedef struct
     /* Detected CPU count for sizing worker/operator threads */
     uint8_t cpu_count;
 
-    // future: config_t *config, tls_t *tls, etc.
+    // future: tls_t *tls, etc. (startup config is validated, not stored — see config_validate_startup())
 } server_t;
 
 /*****************************************************************************************************************************************
@@ -115,6 +116,14 @@ int server_init(const char* api_spec, const char* upload_spec)
 #endif /* DEBUG */
 
     _core_logger_bootstrap();
+
+    /* Fail fast on a bad listen spec or env override before touching a single socket, thread, or
+     * transaction slot — config_validate_startup() already logged the specific reason. */
+    if(config_validate_startup(api_spec, upload_spec) != STATUS_SUCCESS)
+    {
+        EML_ERROR(LOG_TAG, "startup config validation failed.");
+        goto fail;
+    }
 
     /* Detect available CPUs and keep the value for thread sizing */
     server.cpu_count = _core_detect_cpu_count();
