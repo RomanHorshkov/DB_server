@@ -1,0 +1,70 @@
+name: Test profile
+
+# Reusable single-profile unit-test job for DB_server's own tests/*_tests.c
+# binaries (operator_lifecycle_tests, response_writer_parking_tests — see
+# utils/build_tests.sh's tests/**/*_tests.c discovery). Called once per
+# profile from ci.yml's needs:-graph. DB_server has the same full 6-profile
+# GCC matrix as its sibling libs (utils/gcc_build_profiles.sh), including a
+# real ASan/UBSan/LSan `sanitize` profile — this used to be built for every
+# push but never actually TESTED under it (run_pipeline.sh only ever built
+# release+audit, and the old single test job hardcoded `release`). The two
+# test binaries are exactly the kind of concurrency code (operator init CAS,
+# response_writer EPOLLOUT parking) sanitizers are good at catching, so
+# `sanitize` is now a real test job, not just a build target.
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ inputs.profile }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout DB_server
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: DB_server
+          persist-credentials: false
+
+      - name: Setup siblings (checkout + build + install)
+        uses: ./DB_server/.github/actions/setup-siblings
+        with:
+          sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: DB_app — build libraries only (DB_server links its release build)
+        run: |
+          cd DB_app
+          ./utils/run_pipeline.sh build
+
+      - name: DB_server — build test binaries (this profile)
+        run: |
+          cd DB_server
+          ./utils/build_tests.sh "${{ inputs.profile }}"
+
+      - name: DB_server — run test binaries (this profile)
+        run: |
+          cd DB_server
+          status=0
+          for bin in build/tests/"${{ inputs.profile }}"/*_tests; do
+            [[ -x "${bin}" ]] || continue
+            echo "::group::$(basename "${bin}")"
+            "${bin}" || status=1
+            echo "::endgroup::"
+          done
+          exit "${status}"
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: db_server-test-${{ inputs.profile }}
+          if-no-files-found: warn
+          path: DB_server/build/tests/${{ inputs.profile }}/**

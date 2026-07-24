@@ -22,29 +22,42 @@ name: CI
 # itself is public, but every sibling it links except SPSCring/fs_util/Utils
 # is private, so the checkout of the first private one 404s without it.
 #
+# DB_server does NOT re-run DB_app's own test suite anymore (an earlier
+# version of this file had a quality-db-app job doing exactly that — the
+# single most expensive job here, ~30 minutes, entirely redundant with what
+# DB_app's own ci.yml already verifies on every DB_app push). DB_server only
+# needs DB_app's built LIBRARY to link against, not a re-verification of
+# DB_app's own correctness — pulling in a sibling's release build and
+# trusting its own CI is the same relationship DB_server has with every
+# other sibling (DB_lmdb, DB_http, DB_jose, EMlog, uuid7, MPSCring,
+# SPSCring). The effort that job used to spend gets spent on DB_server's OWN
+# tests instead — see below.
+#
 # Shaped as a graph, not one monolithic job — same house pattern as
 # EMlog/uuid7/SPSCring/MPSCring's quality.yml:
 #
-#   build (DB_app + siblings build-only, fast fail-first gate)
-#     +-- quality-db-app  — DB_app's own full build+test pipeline
-#     +-- build-db-server — DB_server build (release+audit) + package
-#     +-- test-db-server  — DB_server's own test suite
+#   build (DB_app + siblings, build-only — fast fail-first gate)
+#     +-- test-audit       (tests/*_tests.c under the audit profile)
+#     +-- test-sanitize    (same, under ASan/UBSan/LSan — wired to a real
+#     |                      test job for the first time; this profile was
+#     |                      being BUILT every push and never actually run
+#     |                      against DB_server's own concurrency code)
+#     +-- test-release     (same, under release)
+#     +-- test-integration (tests/spsc_dispatch_load_test.sh — boots the
+#     |                      real db_server binary and drives concurrent
+#     |                      HTTP load through the actual accept ->
+#     |                      worker_dispatch_to_operator SPSC push ->
+#     |                      operator epoll wakeup -> response path; this
+#     |                      existed in the repo but was never wired into
+#     |                      CI at all)
+#     +--> package         (release + audit build, needs all four verdicts)
 #
-# Each of the three needs:-build jobs re-checks-out and re-builds the full
-# nine-repo sibling chain via the local `setup-siblings` composite action (a
-# composite action, not a reusable workflow, because its whole job is to
-# leave built libraries on THIS job's filesystem for the steps that follow —
-# jobs never share a filesystem without an explicit artifact upload/download,
-# so this is real duplicated build time, not shared state). `build` earns
-# its keep as a single fast fail point (does the whole sibling chain even
-# still compile?) before spending three jobs' worth of runner time in
-# parallel finding that out separately.
-#
-# setup-siblings takes the PAT as an explicit `sibling-token` INPUT, not a
-# job-level env var it reads on its own — composite actions cannot read the
-# `secrets` context directly, and env-var inheritance into composite steps is
-# not something to rely on being obvious; passing it as a declared input is
-# the unambiguous mechanism.
+# Each needs:-build job re-checks-out and re-builds the full nine-repo
+# sibling chain via the local `setup-siblings` composite action — jobs never
+# share a filesystem without an explicit artifact upload/download, so this
+# is real duplicated build time, not shared state. `build` earns its keep as
+# a single fast fail point before spending five jobs' worth of runner time
+# finding the same thing out separately.
 
 on:
   push:
@@ -80,42 +93,29 @@ jobs:
           cd DB_app
           ./utils/run_pipeline.sh build
 
-  quality-db-app:
-    name: DB_app — build + full test pipeline
+  test-audit:
+    name: Audit tests
     needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout DB_server
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          path: DB_server
-          persist-credentials: false
+    uses: ./.github/workflows/_test-profile.yml
+    with: { profile: audit }
+    secrets: inherit
 
-      - name: Setup siblings (checkout + build + install)
-        uses: ./DB_server/.github/actions/setup-siblings
-        with:
-          sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
+  test-sanitize:
+    name: ASan/UBSan/LSan tests
+    needs: build
+    uses: ./.github/workflows/_test-profile.yml
+    with: { profile: sanitize }
+    secrets: inherit
 
-      - name: DB_app — build libraries, build+run tests (all profiles)
-        run: |
-          cd DB_app
-          ./utils/run_pipeline.sh build
-          ./utils/run_pipeline.sh build_tests
-          ./utils/run_pipeline.sh run_tests
+  test-release:
+    name: Release tests
+    needs: build
+    uses: ./.github/workflows/_test-profile.yml
+    with: { profile: release }
+    secrets: inherit
 
-      - name: Upload DB_app test results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: db_app-test-results
-          if-no-files-found: warn
-          path: |
-            DB_app/build/tests/results.tsv
-            DB_app/build/tests/**/*.log
-
-  build-db-server:
-    name: Build DB_server (release + audit) + package
+  test-integration:
+    name: Integration (real server, concurrent load)
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -131,8 +131,38 @@ jobs:
         with:
           sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
 
-      # Only the library is needed here (to link DB_server), not DB_app's
-      # own test verdict — that's quality-db-app's job, running in parallel.
+      - name: DB_app — build libraries only
+        run: |
+          cd DB_app
+          ./utils/run_pipeline.sh build
+
+      - name: DB_server — build the release binary
+        run: |
+          cd DB_server
+          ./utils/build_bin.sh release
+
+      - name: DB_server — spsc_dispatch_load_test.sh (boots the real binary)
+        run: |
+          cd DB_server
+          ./tests/spsc_dispatch_load_test.sh
+
+  package:
+    name: Package (release + audit) + install
+    needs: [test-audit, test-sanitize, test-release, test-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout DB_server
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: DB_server
+          persist-credentials: false
+
+      - name: Setup siblings (checkout + build + install)
+        uses: ./DB_server/.github/actions/setup-siblings
+        with:
+          sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
+
       - name: DB_app — build libraries only
         run: |
           cd DB_app
@@ -152,54 +182,3 @@ jobs:
           path: |
             DB_server/build/pipeline/**
             DB_server/build/debs/*.deb
-
-  test-db-server:
-    name: DB_server — test suite (release)
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout DB_server
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          path: DB_server
-          persist-credentials: false
-
-      - name: Setup siblings (checkout + build + install)
-        uses: ./DB_server/.github/actions/setup-siblings
-        with:
-          sibling-token: ${{ secrets.SIBLING_REPOS_PAT || secrets.GITHUB_TOKEN }}
-
-      - name: DB_app — build libraries only
-        run: |
-          cd DB_app
-          ./utils/run_pipeline.sh build
-
-      # run_pipeline.sh (the other two jobs) does NOT build or run
-      # tests/*_tests.c — that's a separate step, matching
-      # tests/bench/DANGEROUS_FOR_THE_HOST_TESTS.sh's build_everything, which
-      # drives this same repo the same way.
-      - name: DB_server — build test suite (release)
-        run: |
-          cd DB_server
-          ./utils/build_tests.sh release
-
-      - name: DB_server — run test suite
-        run: |
-          cd DB_server
-          status=0
-          for bin in build/tests/release/*_tests; do
-            [[ -x "${bin}" ]] || continue
-            echo "::group::$(basename "${bin}")"
-            "${bin}" || status=1
-            echo "::endgroup::"
-          done
-          exit "${status}"
-
-      - name: Upload DB_server test logs
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: db_server-test-logs
-          if-no-files-found: warn
-          path: DB_server/build/tests/release/**
