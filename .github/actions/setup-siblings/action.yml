@@ -1,105 +1,34 @@
 name: Setup DB_server siblings
 description: >
-  Checks out and builds/installs the nine sibling repos DB_server (and the
-  DB_app it links) transitively need, as peers of whatever repo already
-  occupies $GITHUB_WORKSPACE/DB_server. A composite action, not a reusable
-  workflow: this has to run as STEPS inside the calling job, not a separate
-  job on its own runner, because the whole point is leaving built libraries
-  and installed .debs on the SAME filesystem the calling job's later steps
-  (DB_app's pipeline, DB_server's own build) read from. Three of ci.yml's
-  jobs each call this once — that's real duplicated build time, not shared
-  state, since GitHub Actions jobs never share a filesystem without an
-  explicit artifact upload/download; a composite action only de-duplicates
-  the YAML, not the compute.
+  Installs the latest RELEASED .deb of every low-level sibling dependency DB_server (and the
+  DB_app it links) transitively needs, instead of checking out and rebuilding each one from
+  source on every job. Replaces the previous source-checkout design (2026-07-25): actions/checkout
+  with no `ref:` pinned silently defaults to each sibling's own default branch, which drifted out
+  of sync with what this repo's branch actually needed — this exact bug class broke DB_app's own
+  CI against a stale DB_lmdb source checkout. Each low-level sibling now publishes its own .deb
+  via its own release.yml (triggered by its own auto-tag-release.yml on every one of ITS master
+  pushes), so `gh release download` always resolves to that sibling's actual latest stable,
+  versioned artifact — never an ambiguous branch snapshot.
+
+  DB_app is the one exception: it's a product repo, not a library, and deliberately has no
+  release/auto-tag mechanism of its own (see docs/HARDENING_TODO.md's low-level-vs-product repo
+  split). It still needs a real source checkout+build here — but pinned explicitly to
+  `safety_upgrades` rather than left unpinned, since that's this whole project's actual active
+  branch and the one DB_server's own work depends on; an unpinned checkout would have hit the
+  exact same silent-wrong-branch bug this whole rewrite exists to close.
+
+  A composite action, not a reusable workflow: this has to run as STEPS inside the calling job,
+  not a separate job on its own runner, so the installed .debs / built DB_app land on the SAME
+  filesystem the calling job's later steps (DB_server's own build/test) read from.
 
 inputs:
   sibling-token:
-    description: SIBLING_REPOS_PAT (or GITHUB_TOKEN fallback), passed explicitly — composite actions cannot read the secrets context directly.
+    description: SIBLING_REPOS_PAT (or GITHUB_TOKEN fallback), passed explicitly — composite actions cannot read the secrets context directly. Needs at least read access to every sibling repo (releases for the low-level ones, source for DB_app).
     required: true
 
 runs:
   using: composite
   steps:
-    - name: Checkout DB_app (sibling — DB_server links its release build)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/DB_app
-        path: DB_app
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout DB_http (sibling — DB_server links its release build)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/DB_http
-        path: DB_http
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout DB_lmdb (sibling — DB_app and DB_server both link it)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/DB_lmdb
-        path: DB_lmdb
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout DB_jose (sibling — DB_app and DB_server both link it)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/DB_jose
-        path: DB_jose
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout EMlog (sibling — DB_app/DB_jose/DB_lmdb/DB_server all need it)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/EMlog
-        path: EMlog
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout uuid7 (sibling — DB_app/DB_lmdb/DB_server all need it)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/uuid7
-        path: uuid7
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout MPSCring (sibling — DB_app and DB_server both link it)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/MPSCring
-        path: MPSCring
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout SPSCring (sibling — DB_server links it directly)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/SPSCring
-        path: SPSCring
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout fs_util (sibling — DB_lmdb compiles its source directly)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/fs_util
-        path: fs_util
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
-    - name: Checkout Utils (sibling — DB_jose and DB_app both include <utils/*.h>)
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      with:
-        repository: RomanHorshkov/Utils
-        path: Utils
-        token: ${{ inputs.sibling-token }}
-        persist-credentials: false
-
     - name: Install apt dependencies
       shell: bash
       env: { DEBIAN_FRONTEND: noninteractive }
@@ -109,67 +38,42 @@ runs:
           build-essential pkg-config fakeroot \
           liblmdb-dev libsodium-dev zlib1g-dev libcmocka-dev gcovr
 
-    - name: Build + install EMlog
+    - name: Install latest release of every low-level sibling
       shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.sibling-token }}
       run: |
-        cd EMlog
-        ./utils/build_deb.sh
-        sudo apt-get install -y ./build/debs/emlog_*.deb
+        set -euo pipefail
 
-    - name: Build + install uuid7
-      shell: bash
-      run: |
-        cd uuid7
-        ./utils/build_deb.sh
-        sudo apt-get install -y ./build/debs/uuid7_*.deb
+        install_latest() {
+          local repo="$1" pattern="$2"
+          local dir="/tmp/sibling-debs/${repo}"
+          echo "::group::${repo} (${pattern})"
+          mkdir -p "${dir}"
+          gh release download --repo "RomanHorshkov/${repo}" --pattern "${pattern}" --dir "${dir}" --clobber
+          sudo apt-get install -y "${dir}"/${pattern}
+          echo "::endgroup::"
+        }
 
-    - name: Build + install MPSCring
-      shell: bash
-      run: |
-        cd MPSCring
-        ./utils/build_deb.sh
-        sudo apt-get install -y ./build/debs/mpscring_*.deb
+        install_latest EMlog     'emlog_*.deb'
+        install_latest uuid7     'uuid7_*.deb'
+        install_latest MPSCring  'mpscring_*.deb'
+        install_latest SPSCring  'spscring_*.deb'
+        install_latest Utils     'rh-util-*.deb'
+        install_latest DB_http   'db-http_*.deb'
 
-    - name: Build + install SPSCring
-      shell: bash
-      run: |
-        cd SPSCring
-        ./utils/build_deb.sh
-        sudo apt-get install -y ./build/debs/spscring_*.deb
+        sudo ldconfig
 
-    - name: Build + install Utils (header-only debs)
-      shell: bash
-      run: |
-        cd Utils
-        ./compilation/build_deb.sh
-        sudo apt-get install -y ./build/debs/rh-util-*.deb
+        install_latest DB_jose   'libdb-jose-dev_*.deb'
+        install_latest DB_lmdb   'libdb-lmdb-dev_*.deb'
 
-    - name: ldconfig refresh
-      shell: bash
-      run: sudo ldconfig
+        sudo ldconfig
 
-    # DB_http: needs Utils already installed (previous step — db_http_project.sh
-    # hard-requires utils/memory_macros.h + utils/string_view.h to build at
-    # all). MUST be actually INSTALLED, not just built in place — DB_app's
-    # request.h does a plain #include <DB_http/DB_http_types.h> with no
-    # sibling-first override in db_app_project.sh, so build_libs.sh alone
-    # (the pre-existing, never-actually-CI-tested version of this step) left
-    # the header nowhere DB_app's build could find it.
-    - name: Build + install DB_http
-      shell: bash
-      run: |
-        cd DB_http
-        ./utils/build_deb.sh
-        sudo apt-get install -y ./build/debs/db-http_*.deb
-
-    - name: Build DB_jose (release) + stage its deb
-      shell: bash
-      run: |
-        cd DB_jose
-        ./utils/build_deb.sh
-
-    - name: Build DB_lmdb (release — needs fs_util/uuid7/EMlog as sibling source)
-      shell: bash
-      run: |
-        cd DB_lmdb
-        ./utils/build_libs.sh --profile release
+    - name: Checkout DB_app (sibling — product repo, no release mechanism, pinned to the active branch)
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        repository: RomanHorshkov/DB_app
+        ref: safety_upgrades
+        path: DB_app
+        token: ${{ inputs.sibling-token }}
+        persist-credentials: false
